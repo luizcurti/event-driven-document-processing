@@ -1,0 +1,7 @@
+node_modules
+dist
+.artifacts
+.terraform
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup

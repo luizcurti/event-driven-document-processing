@@ -1,0 +1,145 @@
+{
+  "Comment": "Document processing pipeline",
+  "StartAt": "NormalizeInput",
+  "States": {
+    "NormalizeInput": {
+      "Type": "Pass",
+      "Parameters": {
+        "bucket.$": "$.bucket",
+        "key.$": "$.key",
+        "documentId.$": "States.ArrayGetItem(States.StringSplit($.key, '/'), 0)"
+      },
+      "Next": "FanOutProcessing"
+    },
+    "FanOutProcessing": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "OCR",
+          "States": {
+            "OCR": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${ocr_lambda_arn}",
+                "Payload.$": "$"
+              },
+              "ResultSelector": {
+                "ocr.$": "$.Payload"
+              },
+              "OutputPath": "$.ocr",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Thumbnail",
+          "States": {
+            "Thumbnail": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${thumbnail_lambda_arn}",
+                "Payload.$": "$"
+              },
+              "ResultSelector": {
+                "thumbnail.$": "$.Payload"
+              },
+              "OutputPath": "$.thumbnail",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Validation",
+          "States": {
+            "Validation": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${validation_lambda_arn}",
+                "Payload.$": "$"
+              },
+              "ResultSelector": {
+                "validation.$": "$.Payload"
+              },
+              "OutputPath": "$.validation",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.parallelResults",
+      "Next": "NormalizeParallelOutput"
+    },
+    "NormalizeParallelOutput": {
+      "Type": "Pass",
+      "Parameters": {
+        "documentId.$": "$.documentId",
+        "bucket.$": "$.bucket",
+        "key.$": "$.key",
+        "ocr.$": "$.parallelResults[0]",
+        "thumbnail.$": "$.parallelResults[1]",
+        "validation.$": "$.parallelResults[2]"
+      },
+      "Next": "MergeResults"
+    },
+    "MergeResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${merge_results_lambda_arn}",
+        "Payload": {
+          "documentId.$": "$.documentId",
+          "ocr.$": "$.ocr.ocr",
+          "thumbnail.$": "$.thumbnail.thumbnail",
+          "validation.$": "$.validation.validation"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Next": "PersistMetadata"
+    },
+    "PersistMetadata": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${metadata_lambda_arn}",
+        "Payload.$": "$"
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "End": true
+    }
+  }
+}

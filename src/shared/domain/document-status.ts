@@ -1,0 +1,6 @@
+export enum DocumentStatus {
+  RECEIVED = "RECEIVED",
+  PROCESSING = "PROCESSING",
+  PROCESSED = "PROCESSED",
+  FAILED = "FAILED"
+}
