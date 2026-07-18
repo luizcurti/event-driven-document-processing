@@ -97,6 +97,10 @@ vitest.config.ts
 
 Important note: the business `documentId` is consistently derived from the `S3 key` path (`<documentId>/<file>.pdf`) in the state machine.
 
+## Architecture Diagram
+
+![Document processing architecture diagram](docs/diagram.png)
+
 ## How To Use
 
 ```bash
