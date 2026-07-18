@@ -2,7 +2,7 @@
   "name": "document-processing-platform",
   "version": "0.1.0",
   "private": true,
-  "description": "Plataforma de processamento de documentos orientada a eventos na AWS.",
+  "description": "Event-driven document processing platform on AWS.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",

@@ -5,7 +5,7 @@ documents_bucket_force_destroy = true
 lambda_artifacts_bucket       = "document-processing-artifacts-dev"
 lambda_artifacts_prefix       = "lambdas/dev"
 
-# Opcional: sobrepor chave S3 por funcao
+# Optional: override S3 key per function
 # lambda_artifact_keys = {
 #   upload       = "lambdas/dev/upload.zip"
 #   ocr          = "lambdas/dev/ocr.zip"

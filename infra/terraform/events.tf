@@ -1,6 +1,6 @@
 resource "aws_cloudwatch_event_rule" "s3_object_created" {
   name        = "${local.name_prefix}-s3-object-created"
-  description = "Dispara Step Functions para novos PDFs no bucket"
+  description = "Triggers Step Functions for new PDFs in the bucket"
 
   event_pattern = jsonencode({
     source      = ["aws.s3"]

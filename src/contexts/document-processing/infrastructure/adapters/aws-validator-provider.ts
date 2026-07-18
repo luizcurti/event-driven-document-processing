@@ -19,11 +19,11 @@ export class AwsValidatorProvider implements ValidatorProvider {
     const reasons: string[] = [];
 
     if ((head.ContentLength ?? 0) <= 0) {
-      reasons.push("Arquivo vazio");
+      reasons.push("Empty file");
     }
 
     if (head.ContentType !== "application/pdf") {
-      reasons.push("Content-Type invalido; esperado application/pdf");
+      reasons.push("Invalid Content-Type; expected application/pdf");
     }
 
     return {

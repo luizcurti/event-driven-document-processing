@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       deploy_prod:
-        description: "Executar deploy em producao"
+        description: "Run deployment in production"
         required: true
         type: boolean
         default: false

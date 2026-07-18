@@ -1,51 +1,103 @@
 # Document Processing Platform
 
-Base inicial de um sistema de processamento de arquivos com arquitetura orientada a eventos.
+A starter codebase for an event-driven document processing system.
 
-## Stack
+## Tech Stack
 
-- Node.js + TypeScript para Lambdas
-- Terraform para provisionamento AWS
-- API Gateway + WAF + Lambda para upload
-- S3 + EventBridge + Step Functions para orquestração
-- DynamoDB para metadados e idempotência
-- SQS + DLQ para notificações
-- CloudWatch para logs
-- KMS (CMK) para criptografia de dados e logs
+- Node.js + TypeScript for Lambda functions
+- Terraform for AWS provisioning
+- API Gateway + WAF + Lambda for document upload
+- S3 + EventBridge + Step Functions for orchestration
+- DynamoDB for metadata and idempotency
+- SQS + DLQ for notifications
+- CloudWatch for logs
+- KMS (CMK) for data and log encryption
 
-## Estrutura
+## Current Structure
 
 ```text
+.github/
+  workflows/
+    deploy.yml
+    rollback.yml
+docs/
+  instructions.txt
+infra/
+  terraform/
+    environments/
+      dev.tfvars
+      prod.tfvars
+    templates/
+      state-machine.asl.json.tftpl
+    api.tf
+    events.tf
+    iam.tf
+    lambda.tf
+    locals.tf
+    outputs.tf
+    security.tf
+    step-functions.tf
+    storage.tf
+    terraform.tfvars.example
+    variables.tf
+    versions.tf
 src/
   contexts/
     document-ingestion/
+      application/
+      domain/
+      infrastructure/
     document-processing/
+      application/
+      domain/
+      infrastructure/
     notification/
+      application/
+      infrastructure/
   functions/
+    merge-results.ts
+    metadata.ts
+    notification.ts
+    ocr.ts
+    thumbnail.ts
+    upload.ts
+    validation.ts
   shared/
-infra/terraform/
+    contracts/
+    domain/
+    infrastructure/
+tests/
+  use-cases.test.ts
+workflows/
+  deploy.yml
+  rollback.yml
+deploy.yml
+rollback.yml
+package.json
+tsconfig.json
+vitest.config.ts
 ```
 
-## Princípios adotados
+## Design Principles
 
-- DDD por contexto de negócio
+- DDD by business context
 - Clean Architecture (Domain, Application, Infrastructure)
 - Hexagonal architecture (ports/adapters)
-- Idempotência por chave de requisição
-- Event-driven com fan-out e orquestração
+- Idempotency by request key
+- Event-driven design with fan-out and orchestration
 
-## Fluxo principal
+## Main Flow
 
-1. `Upload Lambda` recebe requisição do `API Gateway`.
-2. Metadados iniciais vão para `DynamoDB`.
-3. Arquivo é salvo no `S3`.
-4. Evento de objeto criado vai para `EventBridge`.
-5. `Step Functions` executa OCR, thumbnail e validação em paralelo.
-6. Resultado consolidado é persistido e notificação é enviada via `SQS`.
+1. `Upload Lambda` receives a request from `API Gateway`.
+2. Initial metadata is written to `DynamoDB`.
+3. The file is stored in `S3`.
+4. The object-created event is sent to `EventBridge`.
+5. `Step Functions` runs OCR, thumbnail generation, and validation in parallel.
+6. The merged result is persisted and a notification is sent through `SQS`.
 
-Observacao importante: o `documentId` de negocio e derivado de forma consistente do caminho `S3 key` (`<documentId>/<arquivo>.pdf`) na state machine.
+Important note: the business `documentId` is consistently derived from the `S3 key` path (`<documentId>/<file>.pdf`) in the state machine.
 
-## Como usar
+## How To Use
 
 ```bash
 npm install
@@ -62,62 +114,66 @@ terraform init
 terraform plan
 ```
 
-## Deploy de Lambda sem path local fixo
+## Lambda Deploy Without Fixed Local Paths
 
-As funcoes Lambda sao publicadas a partir de artefatos zip em S3 (padrao CI/CD).
+Lambda functions are published from zip artifacts in S3 (CI/CD standard).
 
-Fluxo recomendado para qualquer ambiente (dev, stage, prod):
+Recommended flow for any environment (dev, stage, prod):
 
-1. Build e empacotamento das Lambdas no pipeline.
-2. Upload dos zips para um bucket de artefatos S3.
-3. Definicao das variaveis `lambda_artifacts_bucket` e `lambda_artifacts_prefix` no ambiente.
-4. `terraform apply` usando os artefatos daquele ambiente.
+1. Build and package Lambda functions in the pipeline.
+2. Upload zip artifacts to an S3 artifacts bucket.
+3. Set `lambda_artifacts_bucket` and `lambda_artifacts_prefix` for the target environment.
+4. Run `terraform apply` using that environment artifacts.
 
-Isso evita dependencia de caminhos locais como `../../dist` e permite o mesmo codigo Terraform para multiplos ambientes.
+This avoids local path dependencies such as `../../dist` and allows the same Terraform code across multiple environments.
 
-## Ambientes
+## Environments
 
-Arquivos de variaveis por ambiente:
+Environment variable files:
 
 - `infra/terraform/environments/dev.tfvars`
 - `infra/terraform/environments/prod.tfvars`
 
 ## CI/CD (GitHub Actions)
 
-Workflows:
+Workflows in use:
 
 - `.github/workflows/deploy.yml`
 - `.github/workflows/rollback.yml`
+- `deploy.yml`
+- `rollback.yml`
+- `workflows/deploy.yml`
+- `workflows/rollback.yml`
 
-Comportamento:
+Behavior:
 
-1. PR aberta/sincronizada: cria ou atualiza ambiente efemero (`pr-<numero>-<branch>`).
-2. PR fechada: destroi ambiente efemero.
-3. Merge na `main`: deploy automatico em `dev`.
-4. `prod`: deploy manual via `workflow_dispatch` com aprovacao de ambiente no GitHub e somente a partir de `main` ou tag `v*`.
+1. Open or synchronized PR: creates or updates an ephemeral environment (`pr-<number>-<branch>`).
+2. Closed PR: destroys the ephemeral environment.
+3. Merge into `main`: automatic deploy to `dev`.
+4. `prod`: manual deploy via `workflow_dispatch`, with GitHub environment approval, only from `main` or a `v*` tag.
 
-### Configuracao obrigatoria no GitHub
+### Required GitHub Setup
 
-1. Criar os environments: `ephemeral`, `dev`, `prod`.
-2. Em `prod`, configurar `Required reviewers` para aprovacoes extras.
-3. Configurar secrets de repositorio:
-  - `AWS_ROLE_TO_ASSUME`
-  - `LAMBDA_ARTIFACTS_BUCKET`
-  - `TF_STATE_BUCKET`
+1. Create environments: `ephemeral`, `dev`, `prod`.
+2. In `prod`, configure `Required reviewers` for additional approvals.
+3. Configure repository secrets:
+   - `AWS_ROLE_TO_ASSUME`
+   - `LAMBDA_ARTIFACTS_BUCKET`
+   - `TF_STATE_BUCKET`
 
 ## Rollback
 
-Executar o workflow `Rollback Environment` informando:
+Run the `Rollback Environment` workflow with:
 
-1. `target_environment` (`dev` ou `prod`)
-2. `rollback_version` (ex.: `main-a1b2c3d` ou `prod-a1b2c3d`)
+1. `target_environment` (`dev` or `prod`)
+2. `rollback_version` (for example: `main-a1b2c3d` or `prod-a1b2c3d`)
 
-O rollback funciona apontando o Terraform para um prefixo anterior de artefatos em S3:
+Rollback works by pointing Terraform to a previous S3 artifacts prefix:
 
-- `lambdas/<ambiente>/<rollback_version>`
+- `lambdas/<environment>/<rollback_version>`
 
-## Observabilidade e seguranca
+## Observability and Security
 
-- Log group dedicado para cada Lambda com retencao configuravel.
-- Logs de API Gateway e Step Functions no CloudWatch com KMS.
-- S3, DynamoDB, SQS e SNS com criptografia usando CMK (KMS).
+- Dedicated log group for each Lambda with configurable retention.
+- API Gateway and Step Functions logs in CloudWatch with KMS.
+- S3, DynamoDB, SQS, and SNS encrypted with CMK (KMS).

@@ -1,52 +1,52 @@
 variable "project_name" {
-  description = "Nome base do projeto."
+  description = "Base project name."
   type        = string
   default     = "document-processing-platform"
 }
 
 variable "environment" {
-  description = "Ambiente de deploy."
+  description = "Deployment environment."
   type        = string
   default     = "dev"
 }
 
 variable "aws_region" {
-  description = "Regiao AWS."
+  description = "AWS region."
   type        = string
   default     = "us-east-1"
 }
 
 variable "documents_bucket_force_destroy" {
-  description = "Permite destruir bucket com objetos."
+  description = "Allow destroying bucket with objects."
   type        = bool
   default     = true
 }
 
 variable "lambda_artifacts_bucket" {
-  description = "Bucket S3 onde os zips das Lambdas sao publicados pelo pipeline."
+  description = "S3 bucket where Lambda zip artifacts are published by the pipeline."
   type        = string
 }
 
 variable "lambda_artifacts_prefix" {
-  description = "Prefixo S3 para artefatos de Lambda."
+  description = "S3 prefix for Lambda artifacts."
   type        = string
   default     = "lambdas"
 }
 
 variable "lambda_artifact_keys" {
-  description = "Mapeamento opcional por lambda para chave S3 completa do zip."
+  description = "Optional per-lambda mapping to full S3 zip key."
   type        = map(string)
   default     = {}
 }
 
 variable "lambda_artifact_hashes" {
-  description = "Mapeamento opcional por lambda com hash base64sha256 do zip."
+  description = "Optional per-lambda mapping with zip base64sha256 hash."
   type        = map(string)
   default     = {}
 }
 
 variable "logs_retention_in_days" {
-  description = "Retencao de logs no CloudWatch."
+  description = "CloudWatch logs retention in days."
   type        = number
   default     = 30
 }

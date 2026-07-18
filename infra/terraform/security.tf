@@ -78,7 +78,7 @@ data "aws_iam_policy_document" "kms_key" {
 }
 
 resource "aws_kms_key" "platform" {
-  description             = "CMK para recursos da plataforma de processamento"
+  description             = "CMK for document processing platform resources"
   deletion_window_in_days = 7
   enable_key_rotation     = true
   policy                  = data.aws_iam_policy_document.kms_key.json

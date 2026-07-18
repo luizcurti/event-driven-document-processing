@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       target_environment:
-        description: "Ambiente alvo do rollback"
+        description: "Target environment for rollback"
         required: true
         type: choice
         options:
           - dev
           - prod
       rollback_version:
-        description: "Versao de artefato para rollback (ex.: main-a1b2c3d ou prod-a1b2c3d)"
+        description: "Artifact version for rollback (e.g.: main-a1b2c3d or prod-a1b2c3d)"
         required: true
         type: string
 

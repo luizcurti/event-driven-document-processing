@@ -1,24 +1,24 @@
 output "api_url" {
-  description = "URL base da API de upload."
+  description = "Base URL for the upload API."
   value       = aws_apigatewayv2_api.upload_api.api_endpoint
 }
 
 output "documents_bucket" {
-  description = "Bucket de documentos."
+  description = "Documents bucket."
   value       = aws_s3_bucket.documents.bucket
 }
 
 output "step_functions_arn" {
-  description = "ARN da maquina de estado."
+  description = "State machine ARN."
   value       = aws_sfn_state_machine.document_pipeline.arn
 }
 
 output "notification_queue_url" {
-  description = "URL da fila de notificacoes."
+  description = "Notification queue URL."
   value       = aws_sqs_queue.notifications.url
 }
 
 output "notification_topic_arn" {
-  description = "ARN do topico SNS de notificacoes."
+  description = "Notification SNS topic ARN."
   value       = aws_sns_topic.notifications.arn
 }
