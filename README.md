@@ -1,183 +1,219 @@
 # Document Processing Platform
 
-A starter codebase for an event-driven document processing system.
+Serverless, event-driven PDF processing platform built with Node.js, TypeScript, Terraform, and AWS services.
 
-## Tech Stack
+## Architecture
 
-- Node.js + TypeScript for Lambda functions
-- Terraform for AWS provisioning
-- API Gateway + WAF + Lambda for document upload
-- S3 + EventBridge + Step Functions for orchestration
-- DynamoDB for metadata and idempotency
-- SQS + DLQ for notifications
-- CloudWatch for logs
-- KMS (CMK) for data and log encryption
+Main flow:
 
-## Current Structure
+1. `POST /documents` on API Gateway invokes the Upload Lambda.
+2. The Upload Lambda validates the input, generates a `documentId`, saves the initial metadata in DynamoDB, and returns an `uploadUrl` (S3 presigned URL).
+3. The client uploads the PDF to S3 using the `uploadUrl`.
+4. The S3 `Object Created` event reaches EventBridge.
+5. EventBridge starts Step Functions.
+6. Step Functions runs OCR, Thumbnail, and Validation in parallel.
+7. Merge Results consolidates the data.
+8. The Metadata Lambda persists the final result in DynamoDB and publishes an event to SQS.
+9. The Notification Lambda consumes SQS and publishes to SNS.
 
-```text
-.github/
-  workflows/
-    deploy.yml
-    rollback.yml
-docs/
-  instructions.txt
-infra/
-  terraform/
-    environments/
-      dev.tfvars
-      prod.tfvars
-    templates/
-      state-machine.asl.json.tftpl
-    api.tf
-    events.tf
-    iam.tf
-    lambda.tf
-    locals.tf
-    outputs.tf
-    security.tf
-    step-functions.tf
-    storage.tf
-    terraform.tfvars.example
-    variables.tf
-    versions.tf
-src/
-  contexts/
-    document-ingestion/
-      application/
-      domain/
-      infrastructure/
-    document-processing/
-      application/
-      domain/
-      infrastructure/
-    notification/
-      application/
-      infrastructure/
-  functions/
-    merge-results.ts
-    metadata.ts
-    notification.ts
-    ocr.ts
-    thumbnail.ts
-    upload.ts
-    validation.ts
-  shared/
-    contracts/
-    domain/
-    infrastructure/
-tests/
-  use-cases.test.ts
-workflows/
-  deploy.yml
-  rollback.yml
-deploy.yml
-rollback.yml
-package.json
-tsconfig.json
-vitest.config.ts
-```
+Important: there is a single DynamoDB table for documents (`documents-metadata`), updated in two moments: initial creation (upload) and final result/failure (post-processing).
 
-## Design Principles
+Diagram: `docs/diagram.png`
 
-- DDD by business context
-- Clean Architecture (Domain, Application, Infrastructure)
-- Hexagonal architecture (ports/adapters)
-- Idempotency by request key
-- Event-driven design with fan-out and orchestration
+## Technologies
 
-## Main Flow
+- Node.js + TypeScript
+- AWS Lambda
+- API Gateway
+- S3
+- EventBridge
+- Step Functions
+- DynamoDB
+- SQS + DLQ
+- SNS
+- CloudWatch
+- KMS
+- WAF (enabled in cloud; optional locally)
+- Terraform
 
-1. `Upload Lambda` receives a request from `API Gateway`.
-2. Initial metadata is written to `DynamoDB`.
-3. The file is stored in `S3`.
-4. The object-created event is sent to `EventBridge`.
-5. `Step Functions` runs OCR, thumbnail generation, and validation in parallel.
-6. The merged result is persisted and a notification is sent through `SQS`.
+## Prerequisites
 
-Important note: the business `documentId` is consistently derived from the `S3 key` path (`<documentId>/<file>.pdf`) in the state machine.
+- Node.js 22+
+- Docker + Docker Compose
+- Terraform 1.6+
 
-## Architecture Diagram
+## Local Quick Start (LocalStack)
 
-![Document processing architecture diagram](docs/diagram.png)
-
-## How To Use
+### 1. Install dependencies and package
 
 ```bash
 npm install
-npm run check
-npm run build
-npm run test:coverage
+npm run package:local
 ```
 
-Terraform:
+This generates `dist/lambda.zip` with all handlers.
+
+### 2. Start LocalStack
+
+```bash
+npm run localstack:up
+```
+
+### 3. Apply Terraform in local mode
 
 ```bash
 cd infra/terraform
 terraform init
-terraform plan
+terraform apply -auto-approve -var-file=environments/local.tfvars
 ```
 
-## Lambda Deploy Without Fixed Local Paths
+### 4. Start the upload flow locally
 
-Lambda functions are published from zip artifacts in S3 (CI/CD standard).
+In LocalStack Community, `apigatewayv2` and parts of the Step Functions API may not be available.
+For that reason, the following are disabled in `local.tfvars`:
 
-Recommended flow for any environment (dev, stage, prod):
+- `enable_api_gateway = false`
+- `enable_step_functions = false`
 
-1. Build and package Lambda functions in the pipeline.
-2. Upload zip artifacts to an S3 artifacts bucket.
-3. Set `lambda_artifacts_bucket` and `lambda_artifacts_prefix` for the target environment.
-4. Run `terraform apply` using that environment artifacts.
+The upload and local processing flow must be validated by invoking the Lambdas directly.
 
-This avoids local path dependencies such as `../../dist` and allows the same Terraform code across multiple environments.
+Example event to invoke the upload Lambda:
 
-## Environments
+```bash
+cat > /tmp/upload-event.json <<'EOF'
+{
+  "version": "2.0",
+  "routeKey": "POST /documents",
+  "rawPath": "/documents",
+  "headers": {
+    "content-type": "application/json",
+    "x-idempotency-key": "req-local-001"
+  },
+  "requestContext": {
+    "requestId": "req-local-001"
+  },
+  "body": "{\"fileName\":\"contract.pdf\",\"contentType\":\"application/pdf\"}"
+}
+EOF
 
-Environment variable files:
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke \
+  --function-name document-processing-platform-local-upload \
+  --payload fileb:///tmp/upload-event.json \
+  /tmp/upload-response.json && cat /tmp/upload-response.json
+```
 
-- `infra/terraform/environments/dev.tfvars`
-- `infra/terraform/environments/prod.tfvars`
+### 5. Upload to S3 using the uploadUrl
 
-## CI/CD (GitHub Actions)
+Expected Lambda response body:
 
-Workflows in use:
+```json
+{
+  "documentId": "...",
+  "uploadUrl": "...",
+  "key": "..."
+}
+```
 
-- `.github/workflows/deploy.yml`
-- `.github/workflows/rollback.yml`
-- `deploy.yml`
-- `rollback.yml`
-- `workflows/deploy.yml`
-- `workflows/rollback.yml`
+### 6. Send the file to S3 with the uploadUrl
 
-Behavior:
+```bash
+curl -X PUT "$UPLOAD_URL" \
+  -H "Content-Type: application/pdf" \
+  --data-binary @./contract.pdf
+```
 
-1. Open or synchronized PR: creates or updates an ephemeral environment (`pr-<number>-<branch>`).
-2. Closed PR: destroys the ephemeral environment.
-3. Merge into `main`: automatic deploy to `dev`.
-4. `prod`: manual deploy via `workflow_dispatch`, with GitHub environment approval, only from `main` or a `v*` tag.
+In cloud, the rest of the flow is asynchronous after the upload (EventBridge -> Step Functions -> Lambdas -> DynamoDB/SQS/SNS).
+In LocalStack Community, use the manual fallback in step 7.
 
-### Required GitHub Setup
+In cloud, API routes use `AWS_IAM` authentication.
 
-1. Create environments: `ephemeral`, `dev`, `prod`.
-2. In `prod`, configure `Required reviewers` for additional approvals.
-3. Configure repository secrets:
-   - `AWS_ROLE_TO_ASSUME`
-   - `LAMBDA_ARTIFACTS_BUCKET`
-   - `TF_STATE_BUCKET`
+Additional status endpoint:
 
-## Rollback
+- `GET /documents/{documentId}`
 
-Run the `Rollback Environment` workflow with:
+### 7. Run the manual pipeline locally (fallback without Step Functions)
 
-1. `target_environment` (`dev` or `prod`)
-2. `rollback_version` (for example: `main-a1b2c3d` or `prod-a1b2c3d`)
+Use the `documentId`, `bucket`, and `key` from the upload response:
 
-Rollback works by pointing Terraform to a previous S3 artifacts prefix:
+```bash
+cat > /tmp/processing-request.json <<'EOF'
+{
+  "documentId": "YOUR_DOCUMENT_ID",
+  "bucket": "document-processing-platform-local-documents",
+  "key": "YOUR_DOCUMENT_ID/contract.pdf"
+}
+EOF
 
-- `lambdas/<environment>/<rollback_version>`
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-processing-platform-local-ocr --payload fileb:///tmp/processing-request.json /tmp/ocr.json && cat /tmp/ocr.json
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-processing-platform-local-thumbnail --payload fileb:///tmp/processing-request.json /tmp/thumbnail.json && cat /tmp/thumbnail.json
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-processing-platform-local-validation --payload fileb:///tmp/processing-request.json /tmp/validation.json && cat /tmp/validation.json
+```
 
-## Observability and Security
+Build the merge payload and execute it:
 
-- Dedicated log group for each Lambda with configurable retention.
-- API Gateway and Step Functions logs in CloudWatch with KMS.
-- S3, DynamoDB, SQS, and SNS encrypted with CMK (KMS).
+```bash
+cat > /tmp/merge-event.json <<'EOF'
+{
+  "documentId": "YOUR_DOCUMENT_ID",
+  "ocr": {"textPreview": "mock", "confidence": 0.99},
+  "thumbnail": {"thumbnailKey": "thumbnails/YOUR_DOCUMENT_ID.json", "width": 320, "height": 200},
+  "validation": {"valid": true, "reasons": []}
+}
+EOF
+
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-processing-platform-local-merge_results --payload fileb:///tmp/merge-event.json /tmp/merged.json && cat /tmp/merged.json
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-processing-platform-local-metadata --payload fileb:///tmp/merged.json /tmp/metadata.json && cat /tmp/metadata.json
+```
+
+The notification Lambda consumes messages automatically from SQS via event source mapping.
+
+## Lambda Environment Variables
+
+The Lambdas receive the following values via Terraform:
+
+- `DOCUMENTS_BUCKET`
+- `DOCUMENTS_METADATA_TABLE`
+- `NOTIFICATION_QUEUE_URL`
+- `NOTIFICATION_TOPIC_ARN`
+- `AWS_EXECUTION_MODE` (`cloud` or `local`)
+- `AWS_ENDPOINT_URL` (local only)
+
+## Cloud Deployment
+
+Use `environments/dev.tfvars` or `environments/prod.tfvars` with:
+
+- `deployment_mode = "cloud"`
+- `lambda_artifacts_bucket` configured
+- `lambda_artifacts_prefix` configured
+- `thumbnail_lambda_image_uri` configured to use the Thumbnail Lambda as a container image
+
+Commands:
+
+```bash
+cd infra/terraform
+terraform init
+terraform plan -var-file=environments/dev.tfvars
+terraform apply -var-file=environments/dev.tfvars
+```
+
+## Tests and Quality
+
+```bash
+npm run check
+npm run test
+npm run test:coverage
+```
+
+Coverage target:
+
+- 100% for lines, functions, branches, and statements.
+
+## Project Notes
+
+- Upload idempotency uses `requestId`/`x-idempotency-key` in DynamoDB.
+- Step Functions retries only transient errors (`Lambda.ServiceException`, `Lambda.TooManyRequestsException`, `States.Timeout`).
+- The notification queue has a DLQ configured with `maxReceiveCount = 3`.
+- The notification queue visibility timeout is set to 120 seconds.
+- In local mode, OCR uses a mock fallback to avoid unsupported service dependencies.
+
+Local default endpoint: `http://127.0.0.1:4566`. To test with a real HTTP API, run in AWS (`deployment_mode = "cloud"`) or use a LocalStack edition with `apigatewayv2` support.

@@ -1,0 +1,9 @@
+project_name                   = "document-processing-platform"
+environment                    = "local"
+aws_region                     = "us-east-1"
+deployment_mode                = "local"
+localstack_endpoint            = "http://127.0.0.1:4566"
+documents_bucket_force_destroy = true
+enable_waf                     = false
+enable_api_gateway             = false
+enable_step_functions          = false

@@ -3,14 +3,14 @@ import { DocumentStatus } from "../../../../shared/domain/document-status";
 import { IdempotencyService } from "../ports/idempotency-service";
 import { MetadataRepository } from "../ports/metadata-repository";
 import { ObjectStorage } from "../ports/object-storage";
+import { randomUUID } from "node:crypto";
 
 export interface UploadDocumentCommand {
   requestId: string;
-  documentId: string;
   fileName: string;
   contentType: string;
-  contentBase64: string;
   bucket: string;
+  documentId?: string;
 }
 
 export class UploadDocumentUseCase {
@@ -20,12 +20,15 @@ export class UploadDocumentUseCase {
     private readonly idempotencyService: IdempotencyService
   ) {}
 
-  async execute(command: UploadDocumentCommand): Promise<{ key: string }> {
-    await this.idempotencyService.ensureNotProcessed(command.requestId);
+  async execute(
+    command: UploadDocumentCommand
+  ): Promise<{ documentId: string; key: string; uploadUrl: string }> {
+    await this.idempotencyService.markProcessed(command.requestId);
 
-    const key = `${command.documentId}/${command.fileName}`;
+    const documentId = command.documentId?.trim() || randomUUID();
+    const key = `${documentId}/${command.fileName}`;
     const document = Document.create({
-      id: command.documentId,
+      id: documentId,
       originalFileName: command.fileName,
       contentType: command.contentType,
       status: DocumentStatus.RECEIVED
@@ -33,15 +36,12 @@ export class UploadDocumentUseCase {
 
     await this.metadataRepository.saveInitial(document);
 
-    await this.objectStorage.putObject({
+    const uploadUrl = await this.objectStorage.generateUploadUrl({
       bucket: command.bucket,
       key,
-      contentBase64: command.contentBase64,
       contentType: command.contentType
     });
 
-    await this.idempotencyService.markProcessed(command.requestId);
-
-    return { key };
+    return { documentId, key, uploadUrl };
   }
 }

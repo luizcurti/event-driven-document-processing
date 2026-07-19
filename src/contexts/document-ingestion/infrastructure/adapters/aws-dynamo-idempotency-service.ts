@@ -1,31 +1,20 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { IdempotencyService } from "../../application/ports/idempotency-service";
+import { getAwsClientConfig } from "../../../../shared/infrastructure/aws/aws-client-config";
 
 export class AwsDynamoIdempotencyService implements IdempotencyService {
   private readonly docClient: DynamoDBDocumentClient;
 
   constructor(
     private readonly tableName: string,
-    ddbClient = new DynamoDBClient({})
+    ddbClient = new DynamoDBClient(getAwsClientConfig("dynamodb"))
   ) {
     this.docClient = DynamoDBDocumentClient.from(ddbClient);
   }
 
-  async ensureNotProcessed(key: string): Promise<void> {
-    const result = await this.docClient.send(
-      new GetCommand({
-        TableName: this.tableName,
-        Key: {
-          pk: `IDEMPOTENCY#${key}`,
-          sk: "REQUEST"
-        }
-      })
-    );
-
-    if (result.Item) {
-      throw new Error("Request already processed");
-    }
+  async ensureNotProcessed(_key: string): Promise<void> {
+    // Deprecated by atomic markProcessed (conditional put).
   }
 
   async markProcessed(key: string): Promise<void> {

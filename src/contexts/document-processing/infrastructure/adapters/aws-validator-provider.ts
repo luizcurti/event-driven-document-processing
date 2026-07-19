@@ -1,8 +1,17 @@
 import { HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ValidatorProvider } from "../../application/ports/validator-provider";
+import {
+  getAwsClientConfig,
+  isLocalAwsMode
+} from "../../../../shared/infrastructure/aws/aws-client-config";
 
 export class AwsValidatorProvider implements ValidatorProvider {
-  constructor(private readonly s3Client = new S3Client({})) {}
+  constructor(
+    private readonly s3Client = new S3Client({
+      ...getAwsClientConfig("s3"),
+      forcePathStyle: isLocalAwsMode()
+    })
+  ) {}
 
   async validate(
     _documentId: string,

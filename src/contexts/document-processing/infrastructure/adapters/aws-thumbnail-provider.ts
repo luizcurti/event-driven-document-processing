@@ -4,9 +4,18 @@ import {
   S3Client
 } from "@aws-sdk/client-s3";
 import { ThumbnailProvider } from "../../application/ports/thumbnail-provider";
+import {
+  getAwsClientConfig,
+  isLocalAwsMode
+} from "../../../../shared/infrastructure/aws/aws-client-config";
 
 export class AwsThumbnailProvider implements ThumbnailProvider {
-  constructor(private readonly s3Client = new S3Client({})) {}
+  constructor(
+    private readonly s3Client = new S3Client({
+      ...getAwsClientConfig("s3"),
+      forcePathStyle: isLocalAwsMode()
+    })
+  ) {}
 
   async generate(
     documentId: string,

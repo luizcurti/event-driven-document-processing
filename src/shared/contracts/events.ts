@@ -2,6 +2,7 @@ export interface ProcessingRequest {
   documentId: string;
   bucket: string;
   key: string;
+  eventId?: string;
 }
 
 export interface OcrResult {

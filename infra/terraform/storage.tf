@@ -69,12 +69,12 @@ resource "aws_sqs_queue" "notifications_dlq" {
 
 resource "aws_sqs_queue" "notifications" {
   name                       = "${local.name_prefix}-notifications"
-  visibility_timeout_seconds = 60
+  visibility_timeout_seconds = 120
   kms_master_key_id          = aws_kms_key.platform.arn
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.notifications_dlq.arn
-    maxReceiveCount     = 5
+    maxReceiveCount     = 3
   })
 
   tags = merge(local.tags, {
@@ -88,5 +88,24 @@ resource "aws_sns_topic" "notifications" {
 
   tags = merge(local.tags, {
     Name = "${local.name_prefix}-notifications-topic"
+  })
+}
+
+resource "aws_sns_topic_policy" "notifications" {
+  arn = aws_sns_topic.notifications.arn
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "AllowEventBridgePublish",
+        Effect = "Allow",
+        Principal = {
+          Service = "events.amazonaws.com"
+        },
+        Action   = "sns:Publish",
+        Resource = aws_sns_topic.notifications.arn
+      }
+    ]
   })
 }

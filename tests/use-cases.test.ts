@@ -3,6 +3,7 @@ import {
   UploadDocumentCommand,
   UploadDocumentUseCase
 } from "../src/contexts/document-ingestion/application/use-cases/upload-document-use-case";
+import { GetDocumentStatusUseCase } from "../src/contexts/document-ingestion/application/use-cases/get-document-status-use-case";
 import { ProcessOcrUseCase } from "../src/contexts/document-processing/application/use-cases/process-ocr-use-case";
 import { ProcessThumbnailUseCase } from "../src/contexts/document-processing/application/use-cases/process-thumbnail-use-case";
 import { ValidateDocumentUseCase } from "../src/contexts/document-processing/application/use-cases/validate-document-use-case";
@@ -15,7 +16,26 @@ import {
 } from "../src/shared/contracts/events";
 
 describe("use cases", () => {
-  it("upload document persists metadata, stores object and marks idempotency", async () => {
+  it("returns the repository result for document status", async () => {
+    const repository = {
+      findByDocumentId: vi.fn(async (documentId: string) => ({
+        documentId,
+        status: "PROCESSED",
+        createdAt: "2026-07-19T00:00:00.000Z"
+      }))
+    };
+
+    const result = await new GetDocumentStatusUseCase(repository).execute("doc-12345");
+
+    expect(result).toEqual({
+      documentId: "doc-12345",
+      status: "PROCESSED",
+      createdAt: "2026-07-19T00:00:00.000Z"
+    });
+    expect(repository.findByDocumentId).toHaveBeenCalledWith("doc-12345");
+  });
+
+  it("persists metadata, stores the object, and marks idempotency on upload", async () => {
     const sequence: string[] = [];
     const metadataRepository = {
       saveInitial: vi.fn(async () => {
@@ -23,14 +43,13 @@ describe("use cases", () => {
       })
     };
     const objectStorage = {
-      putObject: vi.fn(async () => {
-        sequence.push("putObject");
+      generateUploadUrl: vi.fn(async () => {
+        sequence.push("generateUploadUrl");
+        return "https://example.local/upload-url";
       })
     };
     const idempotency = {
-      ensureNotProcessed: vi.fn(async () => {
-        sequence.push("ensureNotProcessed");
-      }),
+      ensureNotProcessed: vi.fn(async () => undefined),
       markProcessed: vi.fn(async () => {
         sequence.push("markProcessed");
       })
@@ -47,31 +66,66 @@ describe("use cases", () => {
       documentId: "doc-12345",
       fileName: "invoice.pdf",
       contentType: "application/pdf",
-      contentBase64: "ZmFrZS1wZGY=",
       bucket: "bucket-a"
     };
 
     const result = await useCase.execute(command);
 
-    expect(result).toEqual({ key: "doc-12345/invoice.pdf" });
+    expect(result).toEqual({
+      documentId: "doc-12345",
+      key: "doc-12345/invoice.pdf",
+      uploadUrl: "https://example.local/upload-url"
+    });
     expect(metadataRepository.saveInitial).toHaveBeenCalledOnce();
-    expect(objectStorage.putObject).toHaveBeenCalledWith({
+    expect(objectStorage.generateUploadUrl).toHaveBeenCalledWith({
       bucket: "bucket-a",
       key: "doc-12345/invoice.pdf",
-      contentBase64: "ZmFrZS1wZGY=",
       contentType: "application/pdf"
     });
-    expect(idempotency.ensureNotProcessed).toHaveBeenCalledWith("req-123");
     expect(idempotency.markProcessed).toHaveBeenCalledWith("req-123");
-    expect(sequence).toEqual([
-      "ensureNotProcessed",
-      "saveInitial",
-      "putObject",
-      "markProcessed"
-    ]);
+    expect(sequence).toEqual(["markProcessed", "saveInitial", "generateUploadUrl"]);
   });
 
-  it("ocr, thumbnail and validation use cases delegate to providers", async () => {
+  it("generates a documentId when one is not provided", async () => {
+    const metadataRepository = {
+      saveInitial: vi.fn(async () => undefined)
+    };
+    const objectStorage = {
+      generateUploadUrl: vi.fn(async () => "https://example.local/upload-url")
+    };
+    const idempotency = {
+      ensureNotProcessed: vi.fn(async () => undefined),
+      markProcessed: vi.fn(async () => undefined)
+    };
+
+    const useCase = new UploadDocumentUseCase(
+      metadataRepository,
+      objectStorage,
+      idempotency
+    );
+
+    const result = await useCase.execute({
+      requestId: "req-456",
+      fileName: "contract.pdf",
+      contentType: "application/pdf",
+      bucket: "bucket-a"
+    });
+
+    expect(result).toEqual({
+      documentId: expect.any(String),
+      key: `${result.documentId}/contract.pdf`,
+      uploadUrl: "https://example.local/upload-url"
+    });
+    expect(result.documentId).toHaveLength(36);
+    expect(metadataRepository.saveInitial).toHaveBeenCalledOnce();
+    expect(objectStorage.generateUploadUrl).toHaveBeenCalledWith({
+      bucket: "bucket-a",
+      key: result.key,
+      contentType: "application/pdf"
+    });
+  });
+
+  it("delegates OCR, thumbnail, and validation use cases to their providers", async () => {
     const request: ProcessingRequest = {
       documentId: "doc-12345",
       bucket: "bucket-a",
@@ -123,7 +177,7 @@ describe("use cases", () => {
     );
   });
 
-  it("merge results creates a processing payload with timestamp", () => {
+  it("creates a processing payload with timestamp when merging results", () => {
     const merged = new MergeResultsUseCase().execute({
       documentId: "doc-12345",
       ocr: { textPreview: "abc", confidence: 0.9 },
@@ -137,7 +191,7 @@ describe("use cases", () => {
     expect(new Date(merged.processedAt).toString()).not.toBe("Invalid Date");
   });
 
-  it("persist metadata writes into repository and publishes queue event", async () => {
+  it("writes to the repository and publishes the queue event when persisting metadata", async () => {
     const repository = { save: vi.fn(async () => undefined) };
     const queue = { publish: vi.fn(async () => undefined) };
 
@@ -159,22 +213,22 @@ describe("use cases", () => {
     });
   });
 
-  it("send notification delegates to sender", async () => {
+  it("delegates notification sending to the sender", async () => {
     const sender = { send: vi.fn(async () => undefined) };
     const useCase = new SendNotificationUseCase(sender);
 
     await useCase.execute({
       documentId: "doc-12345",
-      message: "Documento processado com sucesso"
+      message: "Document processed successfully"
     });
 
     expect(sender.send).toHaveBeenCalledWith({
       documentId: "doc-12345",
-      message: "Documento processado com sucesso"
+      message: "Document processed successfully"
     });
   });
 
-  it("integration-like business flow keeps the same documentId end-to-end", async () => {
+  it("keeps the same documentId end-to-end in an integration-like business flow", async () => {
     let persistedResult: MergedProcessingResult | null = null;
     let queueEvent: Record<string, unknown> | null = null;
     let notificationPayload: { documentId: string; message: string } | null = null;
@@ -184,7 +238,7 @@ describe("use cases", () => {
         saveInitial: vi.fn(async () => undefined)
       },
       {
-        putObject: vi.fn(async () => undefined)
+        generateUploadUrl: vi.fn(async () => "https://example.local/upload-url")
       },
       {
         ensureNotProcessed: vi.fn(async () => undefined),
@@ -194,10 +248,9 @@ describe("use cases", () => {
 
     const uploadResult = await upload.execute({
       requestId: "req-int-1",
-      documentId: "doc-integracao-0001",
-      fileName: "holerite.pdf",
+      documentId: "doc-integration-0001",
+      fileName: "payslip.pdf",
       contentType: "application/pdf",
-      contentBase64: "ZmFrZS1wZGY=",
       bucket: "bucket-int"
     });
 
@@ -213,7 +266,7 @@ describe("use cases", () => {
 
     const thumbnail = await new ProcessThumbnailUseCase({
       generate: vi.fn(async () => ({
-        thumbnailKey: "thumbnails/doc-integracao-0001.png",
+        thumbnailKey: "thumbnails/doc-integration-0001.png",
         width: 320,
         height: 200
       }))
@@ -249,13 +302,13 @@ describe("use cases", () => {
       })
     }).execute({
       documentId: merged.documentId,
-      message: "Documento processado com sucesso"
+      message: "Document processed successfully"
     });
 
-    expect(uploadResult.key).toBe("doc-integracao-0001/holerite.pdf");
-    expect(request.documentId).toBe("doc-integracao-0001");
-    expect(persistedResult?.documentId).toBe("doc-integracao-0001");
-    expect(queueEvent?.documentId).toBe("doc-integracao-0001");
-    expect(notificationPayload?.documentId).toBe("doc-integracao-0001");
+    expect(uploadResult.key).toBe("doc-integration-0001/payslip.pdf");
+    expect(request.documentId).toBe("doc-integration-0001");
+    expect(persistedResult?.documentId).toBe("doc-integration-0001");
+    expect(queueEvent?.documentId).toBe("doc-integration-0001");
+    expect(notificationPayload?.documentId).toBe("doc-integration-0001");
   });
 });

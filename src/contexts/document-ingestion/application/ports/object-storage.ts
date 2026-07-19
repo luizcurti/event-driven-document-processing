@@ -1,8 +1,8 @@
 export interface ObjectStorage {
-  putObject(input: {
+  generateUploadUrl(input: {
     bucket: string;
     key: string;
-    contentBase64: string;
     contentType: string;
-  }): Promise<void>;
+    expiresInSeconds?: number;
+  }): Promise<string>;
 }

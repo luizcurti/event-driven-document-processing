@@ -8,15 +8,22 @@
     "clean": "rm -rf dist",
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:integration:local": "node tests/integration/local-e2e.mjs",
+    "package:local": "npm run clean && npm run build && (cd dist && zip -rq lambda.zip .)",
+    "localstack:up": "docker compose -f docker-compose.local.yml up -d",
+    "localstack:down": "docker compose -f docker-compose.local.yml down -v"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.883.0",
+    "@aws-sdk/client-lambda": "^3.883.0",
     "@aws-sdk/client-s3": "^3.883.0",
+    "@aws-sdk/client-sfn": "^3.883.0",
     "@aws-sdk/client-sns": "^3.883.0",
     "@aws-sdk/client-sqs": "^3.883.0",
     "@aws-sdk/client-textract": "^3.883.0",
-    "@aws-sdk/lib-dynamodb": "^3.883.0"
+    "@aws-sdk/lib-dynamodb": "^3.883.0",
+    "@aws-sdk/s3-request-presigner": "^3.883.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.147",

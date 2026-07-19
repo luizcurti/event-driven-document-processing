@@ -1,9 +1,11 @@
 project_name                  = "document-processing-platform"
 environment                   = "dev"
 aws_region                    = "us-east-1"
+deployment_mode               = "cloud"
 documents_bucket_force_destroy = true
 lambda_artifacts_bucket       = "document-processing-artifacts-dev"
 lambda_artifacts_prefix       = "lambdas/dev"
+thumbnail_lambda_image_uri    = ""
 
 # Optional: override S3 key per function
 # lambda_artifact_keys = {
@@ -15,3 +17,10 @@ lambda_artifacts_prefix       = "lambdas/dev"
 #   metadata     = "lambdas/dev/metadata.zip"
 #   notification = "lambdas/dev/notification.zip"
 # }
+
+# LocalStack (when deployment_mode = "local"):
+# localstack_endpoint = "http://127.0.0.1:4566"
+# local_lambda_zip_path = "../../dist/lambda.zip"
+# enable_waf = false
+# enable_api_gateway = false
+# enable_step_functions = false

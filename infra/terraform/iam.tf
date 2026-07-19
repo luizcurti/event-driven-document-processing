@@ -60,7 +60,19 @@ data "aws_iam_policy_document" "lambda_custom_access" {
   statement {
     sid = "TextractAccess"
     actions = [
-      "textract:DetectDocumentText"
+      "textract:DetectDocumentText",
+      "textract:StartDocumentTextDetection",
+      "textract:GetDocumentTextDetection"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "StepFunctionsCallbackAccess"
+    actions = [
+      "states:StartExecution",
+      "states:SendTaskSuccess",
+      "states:SendTaskFailure"
     ]
     resources = ["*"]
   }
@@ -103,12 +115,15 @@ data "aws_iam_policy_document" "step_functions_assume_role" {
 }
 
 resource "aws_iam_role" "step_functions" {
+  count              = var.enable_step_functions ? 1 : 0
   name               = "${local.name_prefix}-sfn-role"
   assume_role_policy = data.aws_iam_policy_document.step_functions_assume_role.json
   tags               = local.tags
 }
 
 data "aws_iam_policy_document" "step_functions_invoke_lambdas" {
+  count = var.enable_step_functions ? 1 : 0
+
   statement {
     actions = ["lambda:InvokeFunction"]
     resources = [
@@ -118,36 +133,9 @@ data "aws_iam_policy_document" "step_functions_invoke_lambdas" {
 }
 
 resource "aws_iam_role_policy" "step_functions_invoke_lambdas" {
+  count  = var.enable_step_functions ? 1 : 0
   name   = "${local.name_prefix}-sfn-invoke-lambdas"
-  role   = aws_iam_role.step_functions.id
-  policy = data.aws_iam_policy_document.step_functions_invoke_lambdas.json
+  role   = aws_iam_role.step_functions[0].id
+  policy = data.aws_iam_policy_document.step_functions_invoke_lambdas[0].json
 }
 
-data "aws_iam_policy_document" "eventbridge_assume_role" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["events.amazonaws.com"]
-    }
-  }
-}
-
-resource "aws_iam_role" "eventbridge_start_sfn" {
-  name               = "${local.name_prefix}-eventbridge-sfn-role"
-  assume_role_policy = data.aws_iam_policy_document.eventbridge_assume_role.json
-  tags               = local.tags
-}
-
-data "aws_iam_policy_document" "eventbridge_start_sfn" {
-  statement {
-    actions   = ["states:StartExecution"]
-    resources = [aws_sfn_state_machine.document_pipeline.arn]
-  }
-}
-
-resource "aws_iam_role_policy" "eventbridge_start_sfn" {
-  name   = "${local.name_prefix}-eventbridge-start-sfn"
-  role   = aws_iam_role.eventbridge_start_sfn.id
-  policy = data.aws_iam_policy_document.eventbridge_start_sfn.json
-}

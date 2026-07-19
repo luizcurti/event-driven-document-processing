@@ -4,15 +4,28 @@ import {
   TextractClient
 } from "@aws-sdk/client-textract";
 import { OcrProvider } from "../../application/ports/ocr-provider";
+import {
+  getAwsClientConfig,
+  isLocalAwsMode
+} from "../../../../shared/infrastructure/aws/aws-client-config";
 
 export class AwsOcrProvider implements OcrProvider {
-  constructor(private readonly textractClient = new TextractClient({})) {}
+  constructor(
+    private readonly textractClient = new TextractClient(getAwsClientConfig("textract"))
+  ) {}
 
   async extractText(
     _documentId: string,
     bucket: string,
     key: string
   ): Promise<{ textPreview: string; confidence: number }> {
+    if (isLocalAwsMode()) {
+      return {
+        textPreview: `OCR local mock for ${bucket}/${key}`,
+        confidence: 0.99
+      };
+    }
+
     const result = await this.textractClient.send(
       new DetectDocumentTextCommand({
         Document: {

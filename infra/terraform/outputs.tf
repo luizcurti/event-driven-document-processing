@@ -1,6 +1,6 @@
 output "api_url" {
   description = "Base URL for the upload API."
-  value       = aws_apigatewayv2_api.upload_api.api_endpoint
+  value       = var.enable_api_gateway ? aws_apigatewayv2_api.upload_api[0].api_endpoint : null
 }
 
 output "documents_bucket" {
@@ -10,7 +10,7 @@ output "documents_bucket" {
 
 output "step_functions_arn" {
   description = "State machine ARN."
-  value       = aws_sfn_state_machine.document_pipeline.arn
+  value       = var.enable_step_functions ? aws_sfn_state_machine.document_pipeline[0].arn : null
 }
 
 output "notification_queue_url" {

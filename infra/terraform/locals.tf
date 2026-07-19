@@ -13,6 +13,14 @@ locals {
       handler = "functions/upload.handler"
       timeout = 30
     }
+    get_document = {
+      handler = "functions/get-document.handler"
+      timeout = 15
+    }
+    start_workflow = {
+      handler = "functions/start-workflow.handler"
+      timeout = 30
+    }
     ocr = {
       handler = "functions/ocr.handler"
       timeout = 60

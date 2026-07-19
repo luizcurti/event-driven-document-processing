@@ -3,13 +3,21 @@ resource "aws_lambda_function" "this" {
 
   function_name = "${local.name_prefix}-${each.key}"
   role          = aws_iam_role.lambda_execution.arn
-  runtime       = "nodejs22.x"
-  handler       = each.value.handler
+  package_type  = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? "Image" : "Zip"
+  runtime       = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "local" ? "nodejs20.x" : "nodejs22.x")
+  handler       = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : each.value.handler
+  image_uri     = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? var.thumbnail_lambda_image_uri : null
   timeout       = each.value.timeout
-  s3_bucket     = var.lambda_artifacts_bucket
-  s3_key        = lookup(var.lambda_artifact_keys, each.key, "${var.lambda_artifacts_prefix}/${each.key}.zip")
 
-  source_code_hash = lookup(var.lambda_artifact_hashes, each.key, null)
+  filename  = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "local" ? var.local_lambda_zip_path : null)
+  s3_bucket = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "cloud" ? var.lambda_artifacts_bucket : null)
+  s3_key = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "cloud" ? lookup(
+    var.lambda_artifact_keys,
+    each.key,
+    "${var.lambda_artifacts_prefix}/${each.key}.zip"
+  ) : null)
+
+  source_code_hash = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "local" ? filebase64sha256(var.local_lambda_zip_path) : lookup(var.lambda_artifact_hashes, each.key, null))
   kms_key_arn      = aws_kms_key.platform.arn
 
   environment {
@@ -19,6 +27,8 @@ resource "aws_lambda_function" "this" {
       NOTIFICATION_QUEUE_URL   = aws_sqs_queue.notifications.url
       NOTIFICATION_TOPIC_ARN   = aws_sns_topic.notifications.arn
       ENVIRONMENT              = var.environment
+      AWS_EXECUTION_MODE       = var.deployment_mode
+      AWS_ENDPOINT_URL         = var.deployment_mode == "local" ? "http://localhost.localstack.cloud:4566" : ""
     }
   }
 

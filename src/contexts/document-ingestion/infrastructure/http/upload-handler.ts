@@ -12,18 +12,25 @@ export async function uploadHandler(
 ): Promise<APIGatewayProxyResultV2> {
   try {
     const body = event.body ? JSON.parse(event.body) : {};
-    const requestId = event.requestContext.requestId;
+    const requestId =
+      event.requestContext.requestId ||
+      event.headers["x-idempotency-key"] ||
+      event.headers["X-Idempotency-Key"] ||
+      `local-${Date.now()}`;
     const metadataTable = process.env.DOCUMENTS_METADATA_TABLE ?? "";
-    const documentId = typeof body.documentId === "string" ? body.documentId.trim() : "";
     const fileName = typeof body.fileName === "string" ? body.fileName.trim() : "";
-    const contentBase64 = typeof body.contentBase64 === "string" ? body.contentBase64 : "";
+    const contentType =
+      typeof body.contentType === "string" && body.contentType.trim().length > 0
+        ? body.contentType
+        : "application/pdf";
+    const documentId = typeof body.documentId === "string" ? body.documentId.trim() : "";
 
     if (!metadataTable) {
       throw new Error("DOCUMENTS_METADATA_TABLE not configured");
     }
 
-    if (!documentId || !fileName || !contentBase64) {
-      throw new Error("Invalid payload: documentId, fileName and contentBase64 are required");
+    if (!fileName) {
+      throw new Error("Invalid payload: fileName is required");
     }
 
     const useCase = new UploadDocumentUseCase(
@@ -34,28 +41,33 @@ export async function uploadHandler(
 
     const response = await useCase.execute({
       requestId,
-      documentId,
       fileName,
-      contentType: body.contentType ?? "application/pdf",
-      contentBase64,
+      contentType,
+      documentId: documentId || undefined,
       bucket: process.env.DOCUMENTS_BUCKET ?? "documents-bucket"
     });
 
     return {
-      statusCode: 202,
+      statusCode: 200,
       body: JSON.stringify({
-        message: "Upload aceito para processamento",
-        documentKey: response.key
+        documentId: response.documentId,
+        uploadUrl: response.uploadUrl,
+        key: response.key
       })
     };
   } catch (error) {
-    logger.error("Erro no upload", {
+    logger.error("Upload error", {
       error: error instanceof Error ? error.message : "unknown"
     });
 
+    const statusCode =
+      error instanceof Error && error.message.includes("already processed") ? 409 : 400;
+
     return {
-      statusCode: 400,
-      body: JSON.stringify({ message: "Falha ao processar upload" })
+      statusCode,
+      body: JSON.stringify({
+        message: error instanceof Error ? error.message : "Failed to process upload"
+      })
     };
   }
 }
