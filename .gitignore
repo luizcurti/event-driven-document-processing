@@ -1,9 +1,11 @@
 node_modules
 dist
+.DS_Store
 coverage
 .vscode
 .artifacts
 .terraform
+.terraform.tfstate*
 .terraform.lock.hcl
 *.tfstate
 *.tfstate.backup

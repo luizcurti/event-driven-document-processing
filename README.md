@@ -44,6 +44,14 @@ Diagram: `docs/diagram.png`
 
 ## Local Quick Start (LocalStack)
 
+You can bootstrap the full local environment in one command:
+
+```bash
+npm run local:setup
+```
+
+This script installs dependencies when needed, packages the Lambdas, starts LocalStack, runs `terraform init`, and applies the local Terraform stack.
+
 ### 1. Install dependencies and package
 
 ```bash
@@ -65,6 +73,36 @@ npm run localstack:up
 cd infra/terraform
 terraform init
 terraform apply -auto-approve -var-file=environments/local.tfvars
+```
+
+Equivalent one-shot shell script:
+
+```bash
+./scripts/local-up.sh
+```
+
+### 3.1 Verify local resources quickly (recruiter-friendly)
+
+Run a single command to inspect the main LocalStack resources used by the project:
+
+```bash
+npm run local:check
+```
+
+This command checks:
+
+- LocalStack health endpoint
+- DynamoDB tables and item sample
+- SQS queues and message counters
+- S3 buckets and object sample
+- SNS topics
+- Lambda functions
+
+Optional filters:
+
+```bash
+RESOURCE_PREFIX=document-processing-platform-local npm run local:check
+AWS_REGION=us-east-1 AWS_ENDPOINT_URL=http://127.0.0.1:4566 npm run local:check
 ```
 
 ### 4. Start the upload flow locally
@@ -166,6 +204,36 @@ aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-
 ```
 
 The notification Lambda consumes messages automatically from SQS via event source mapping.
+
+## Postman
+
+The repository includes Postman assets under [postman](postman) for both cloud-oriented HTTP testing and the current local-only workflow.
+
+Available files:
+
+- [postman/document-processing-platform.postman_collection.json](postman/document-processing-platform.postman_collection.json): API Gateway oriented collection for a real AWS HTTP endpoint.
+- [postman/document-processing-platform-local.postman_collection.json](postman/document-processing-platform-local.postman_collection.json): LocalStack collection that invokes Lambdas directly through the Lambda API.
+- [postman/document-processing-platform-local.postman_environment.json](postman/document-processing-platform-local.postman_environment.json): Local environment with LocalStack endpoint, test credentials, Lambda names, and the bundled sample PDF path.
+- [postman/contract.pdf](postman/contract.pdf): Sample PDF file used by the upload step.
+
+### Local Postman flow
+
+Because `enable_api_gateway = false` in local mode, the local collection does not call `POST /documents` over HTTP. Instead, it invokes the deployed Lambdas in LocalStack directly.
+
+Recommended order:
+
+1. Import the local collection and local environment.
+2. Start LocalStack and apply Terraform locally with `npm run local:setup` or `./scripts/local-up.sh`.
+3. Run `1. Invoke Upload Lambda`.
+4. Run `2. Upload PDF To Presigned URL`.
+5. Run `3. Invoke OCR Lambda`.
+6. Run `4. Invoke Thumbnail Lambda`.
+7. Run `5. Invoke Validation Lambda`.
+8. Run `6. Invoke Merge Results Lambda`.
+9. Run `7. Invoke Metadata Lambda`.
+10. Run `8. Invoke Get Document Status Lambda`.
+
+The collection automatically stores `documentId`, `uploadUrl`, `uploadKey`, and intermediate processing results as collection variables.
 
 ## Lambda Environment Variables
 

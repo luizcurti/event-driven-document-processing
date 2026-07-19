@@ -1,0 +1,495 @@
+{
+  "info": {
+    "_postman_id": "0f5de8f5-255b-4e24-a3f8-6f2f52be08f1",
+    "name": "Document Processing Platform - LocalStack",
+    "description": "Postman collection for local-only testing with LocalStack Community. This collection does not use API Gateway because local mode keeps API Gateway disabled. Instead, it invokes the Lambda functions directly through the LocalStack Lambda API and then uploads the sample PDF to the returned presigned S3 URL.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "noauth"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if (!pm.collectionVariables.get('requestId')) {",
+          "  pm.collectionVariables.set('requestId', 'req-local-' + pm.variables.replaceIn('{{$guid}}'));",
+          "}",
+          "if (!pm.collectionVariables.get('idempotencyKey')) {",
+          "  pm.collectionVariables.set('idempotencyKey', pm.collectionVariables.get('requestId'));",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Invoke Upload Lambda",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"version\": \"2.0\",\n  \"routeKey\": \"POST /documents\",\n  \"rawPath\": \"/documents\",\n  \"rawQueryString\": \"\",\n  \"headers\": {\n    \"content-type\": \"application/json\",\n    \"x-idempotency-key\": \"{{idempotencyKey}}\"\n  },\n  \"requestContext\": {\n    \"requestId\": \"{{requestId}}\",\n    \"http\": {\n      \"method\": \"POST\",\n      \"path\": \"/documents\"\n    }\n  },\n  \"isBase64Encoded\": false,\n  \"body\": \"{\\\"fileName\\\":\\\"{{sampleFileName}}\\\",\\\"contentType\\\":\\\"{{contentType}}\\\"}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{localstackEndpoint}}/2015-03-31/functions/{{uploadFunctionName}}/invocations",
+          "protocol": "{{localstackProtocol}}",
+          "host": [
+            "{{localstackHost}}"
+          ],
+          "port": "{{localstackPort}}",
+          "path": [
+            "2015-03-31",
+            "functions",
+            "{{uploadFunctionName}}",
+            "invocations"
+          ]
+        },
+        "description": "Invokes the upload Lambda directly in LocalStack using the same API Gateway event contract expected by the handler."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const lambdaResponse = pm.response.json();",
+              "pm.test('Upload lambda returns HTTP 200', function () {",
+              "  pm.expect(lambdaResponse.statusCode).to.eql(200);",
+              "});",
+              "",
+              "const body = JSON.parse(lambdaResponse.body);",
+              "pm.collectionVariables.set('documentId', body.documentId);",
+              "pm.collectionVariables.set('uploadUrl', body.uploadUrl);",
+              "pm.collectionVariables.set('uploadKey', body.key);",
+              "pm.collectionVariables.unset('requestId');",
+              "pm.collectionVariables.unset('idempotencyKey');",
+              "",
+              "pm.test('Upload response contains required fields', function () {",
+              "  pm.expect(body.documentId).to.be.a('string').and.not.empty;",
+              "  pm.expect(body.uploadUrl).to.be.a('string').and.not.empty;",
+              "  pm.expect(body.key).to.be.a('string').and.not.empty;",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "2. Upload PDF To Presigned URL",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "{{contentType}}"
+          }
+        ],
+        "body": {
+          "mode": "file",
+          "file": {
+            "src": "{{localPdfPath}}"
+          }
+        },
+        "url": {
+          "raw": "{{uploadUrl}}"
+        },
+        "description": "Uploads the sample PDF from the postman folder to the presigned S3 URL returned by the upload Lambda."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Presigned upload succeeds', function () {",
+              "  pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "3. Invoke OCR Lambda",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"documentId\": \"{{documentId}}\",\n  \"bucket\": \"{{documentsBucket}}\",\n  \"key\": \"{{uploadKey}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{localstackEndpoint}}/2015-03-31/functions/{{ocrFunctionName}}/invocations",
+          "protocol": "{{localstackProtocol}}",
+          "host": [
+            "{{localstackHost}}"
+          ],
+          "port": "{{localstackPort}}",
+          "path": [
+            "2015-03-31",
+            "functions",
+            "{{ocrFunctionName}}",
+            "invocations"
+          ]
+        },
+        "description": "Runs the local OCR Lambda mock and stores its JSON result as a collection variable for the merge step."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('ocrResult', JSON.stringify(body));",
+              "pm.test('OCR response has expected shape', function () {",
+              "  pm.expect(body).to.be.an('object');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "4. Invoke Thumbnail Lambda",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"documentId\": \"{{documentId}}\",\n  \"bucket\": \"{{documentsBucket}}\",\n  \"key\": \"{{uploadKey}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{localstackEndpoint}}/2015-03-31/functions/{{thumbnailFunctionName}}/invocations",
+          "protocol": "{{localstackProtocol}}",
+          "host": [
+            "{{localstackHost}}"
+          ],
+          "port": "{{localstackPort}}",
+          "path": [
+            "2015-03-31",
+            "functions",
+            "{{thumbnailFunctionName}}",
+            "invocations"
+          ]
+        },
+        "description": "Runs the local thumbnail Lambda mock and stores its JSON result as a collection variable for the merge step."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('thumbnailResult', JSON.stringify(body));",
+              "pm.test('Thumbnail response has expected shape', function () {",
+              "  pm.expect(body).to.be.an('object');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "5. Invoke Validation Lambda",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"documentId\": \"{{documentId}}\",\n  \"bucket\": \"{{documentsBucket}}\",\n  \"key\": \"{{uploadKey}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{localstackEndpoint}}/2015-03-31/functions/{{validationFunctionName}}/invocations",
+          "protocol": "{{localstackProtocol}}",
+          "host": [
+            "{{localstackHost}}"
+          ],
+          "port": "{{localstackPort}}",
+          "path": [
+            "2015-03-31",
+            "functions",
+            "{{validationFunctionName}}",
+            "invocations"
+          ]
+        },
+        "description": "Runs the validation Lambda and stores its JSON result as a collection variable for the merge step."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('validationResult', JSON.stringify(body));",
+              "pm.test('Validation response has expected shape', function () {",
+              "  pm.expect(body).to.be.an('object');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "6. Invoke Merge Results Lambda",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"documentId\": \"{{documentId}}\",\n  \"ocr\": {{ocrResult}},\n  \"thumbnail\": {{thumbnailResult}},\n  \"validation\": {{validationResult}}\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{localstackEndpoint}}/2015-03-31/functions/{{mergeResultsFunctionName}}/invocations",
+          "protocol": "{{localstackProtocol}}",
+          "host": [
+            "{{localstackHost}}"
+          ],
+          "port": "{{localstackPort}}",
+          "path": [
+            "2015-03-31",
+            "functions",
+            "{{mergeResultsFunctionName}}",
+            "invocations"
+          ]
+        },
+        "description": "Combines OCR, thumbnail, and validation outputs using the same payload contract used in the local integration test."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('mergeResult', JSON.stringify(body));",
+              "pm.test('Merge result contains documentId', function () {",
+              "  pm.expect(body.documentId).to.eql(pm.collectionVariables.get('documentId'));",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "7. Invoke Metadata Lambda",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{{mergeResult}}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{localstackEndpoint}}/2015-03-31/functions/{{metadataFunctionName}}/invocations",
+          "protocol": "{{localstackProtocol}}",
+          "host": [
+            "{{localstackHost}}"
+          ],
+          "port": "{{localstackPort}}",
+          "path": [
+            "2015-03-31",
+            "functions",
+            "{{metadataFunctionName}}",
+            "invocations"
+          ]
+        },
+        "description": "Persists the merged processing result in DynamoDB and publishes the notification event to SQS."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.test('Metadata lambda returns ok=true', function () {",
+              "  pm.expect(body.ok).to.eql(true);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "8. Invoke Get Document Status Lambda",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"version\": \"2.0\",\n  \"routeKey\": \"GET /documents/{documentId}\",\n  \"rawPath\": \"/documents/{{documentId}}\",\n  \"pathParameters\": {\n    \"documentId\": \"{{documentId}}\"\n  },\n  \"requestContext\": {\n    \"requestId\": \"status-{{documentId}}\",\n    \"http\": {\n      \"method\": \"GET\",\n      \"path\": \"/documents/{{documentId}}\"\n    }\n  },\n  \"isBase64Encoded\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{localstackEndpoint}}/2015-03-31/functions/{{getDocumentFunctionName}}/invocations",
+          "protocol": "{{localstackProtocol}}",
+          "host": [
+            "{{localstackHost}}"
+          ],
+          "port": "{{localstackPort}}",
+          "path": [
+            "2015-03-31",
+            "functions",
+            "{{getDocumentFunctionName}}",
+            "invocations"
+          ]
+        },
+        "description": "Fetches the final document status by invoking the status Lambda directly with an API Gateway-like event payload."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const lambdaResponse = pm.response.json();",
+              "pm.test('Status lambda returns HTTP 200', function () {",
+              "  pm.expect(lambdaResponse.statusCode).to.eql(200);",
+              "});",
+              "",
+              "const body = JSON.parse(lambdaResponse.body);",
+              "pm.test('Status response contains documentId and status', function () {",
+              "  pm.expect(body.documentId).to.eql(pm.collectionVariables.get('documentId'));",
+              "  pm.expect(body.status).to.be.a('string').and.not.empty;",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "requestId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "idempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "documentId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "uploadUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "uploadKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "ocrResult",
+      "value": "{}",
+      "type": "string"
+    },
+    {
+      "key": "thumbnailResult",
+      "value": "{}",
+      "type": "string"
+    },
+    {
+      "key": "validationResult",
+      "value": "{}",
+      "type": "string"
+    },
+    {
+      "key": "mergeResult",
+      "value": "{}",
+      "type": "string"
+    }
+  ]
+}

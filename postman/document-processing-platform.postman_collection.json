@@ -1,0 +1,318 @@
+{
+  "info": {
+    "_postman_id": "7f4b55ee-f5e8-4b32-8d35-9a87c3a1a201",
+    "name": "Document Processing Platform",
+    "description": "Postman collection for testing the Document Processing Platform API. This collection targets the cloud API Gateway endpoints secured with AWS Signature Version 4. The upload request stores documentId, uploadUrl, and key as collection variables so the next requests can reuse them.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "awsv4",
+    "awsv4": [
+      {
+        "key": "accessKey",
+        "value": "{{awsAccessKeyId}}",
+        "type": "string"
+      },
+      {
+        "key": "secretKey",
+        "value": "{{awsSecretAccessKey}}",
+        "type": "string"
+      },
+      {
+        "key": "sessionToken",
+        "value": "{{awsSessionToken}}",
+        "type": "string"
+      },
+      {
+        "key": "region",
+        "value": "{{awsRegion}}",
+        "type": "string"
+      },
+      {
+        "key": "service",
+        "value": "execute-api",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if (!pm.collectionVariables.get('idempotencyKey')) {",
+          "  pm.collectionVariables.set('idempotencyKey', 'req-' + pm.variables.replaceIn('{{$guid}}'));",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Create Upload URL",
+      "request": {
+        "auth": {
+          "type": "awsv4",
+          "awsv4": [
+            {
+              "key": "accessKey",
+              "value": "{{awsAccessKeyId}}",
+              "type": "string"
+            },
+            {
+              "key": "secretKey",
+              "value": "{{awsSecretAccessKey}}",
+              "type": "string"
+            },
+            {
+              "key": "sessionToken",
+              "value": "{{awsSessionToken}}",
+              "type": "string"
+            },
+            {
+              "key": "region",
+              "value": "{{awsRegion}}",
+              "type": "string"
+            },
+            {
+              "key": "service",
+              "value": "execute-api",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-idempotency-key",
+            "value": "{{idempotencyKey}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fileName\": \"{{sampleFileName}}\",\n  \"contentType\": \"{{contentType}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/documents",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "documents"
+          ]
+        },
+        "description": "Creates a document record and returns a presigned S3 upload URL. This request must be signed with AWS Signature Version 4 when targeting API Gateway in AWS."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status code is 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "",
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('documentId', body.documentId);",
+              "pm.collectionVariables.set('uploadUrl', body.uploadUrl);",
+              "pm.collectionVariables.set('uploadKey', body.key);",
+              "pm.collectionVariables.unset('idempotencyKey');",
+              "",
+              "pm.test('Upload response contains required fields', function () {",
+              "  pm.expect(body.documentId).to.be.a('string').and.not.empty;",
+              "  pm.expect(body.uploadUrl).to.be.a('string').and.not.empty;",
+              "  pm.expect(body.key).to.be.a('string').and.not.empty;",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "2. Upload PDF To Presigned URL",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "{{contentType}}"
+          }
+        ],
+        "body": {
+          "mode": "file",
+          "file": {
+            "src": "{{localPdfPath}}"
+          }
+        },
+        "url": {
+          "raw": "{{uploadUrl}}",
+          "host": [
+            "{{uploadUrl}}"
+          ]
+        },
+        "description": "Uploads the local PDF file to the presigned S3 URL returned by the previous request. No authentication is required because the URL is already signed. By default, localPdfPath points to the contract.pdf file stored in the repository postman folder."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Upload accepted by S3', function () {",
+              "  pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "3. Get Document Status",
+      "request": {
+        "auth": {
+          "type": "awsv4",
+          "awsv4": [
+            {
+              "key": "accessKey",
+              "value": "{{awsAccessKeyId}}",
+              "type": "string"
+            },
+            {
+              "key": "secretKey",
+              "value": "{{awsSecretAccessKey}}",
+              "type": "string"
+            },
+            {
+              "key": "sessionToken",
+              "value": "{{awsSessionToken}}",
+              "type": "string"
+            },
+            {
+              "key": "region",
+              "value": "{{awsRegion}}",
+              "type": "string"
+            },
+            {
+              "key": "service",
+              "value": "execute-api",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/documents/{{documentId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "documents",
+            "{{documentId}}"
+          ]
+        },
+        "description": "Fetches the current status record for the last uploaded document. Run this multiple times after the S3 upload if you want to observe the status transition in AWS."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status endpoint responds with success', function () {",
+              "  pm.expect(pm.response.code).to.be.oneOf([200, 404]);",
+              "});",
+              "",
+              "if (pm.response.code === 200) {",
+              "  const body = pm.response.json();",
+              "  pm.test('Status payload contains documentId and status', function () {",
+              "    pm.expect(body.documentId).to.be.a('string').and.not.empty;",
+              "    pm.expect(body.status).to.be.a('string').and.not.empty;",
+              "  });",
+              "}"
+            ]
+          }
+        }
+      ],
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://your-api-id.execute-api.us-east-1.amazonaws.com",
+      "type": "string"
+    },
+    {
+      "key": "awsRegion",
+      "value": "us-east-1",
+      "type": "string"
+    },
+    {
+      "key": "awsAccessKeyId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "awsSecretAccessKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "awsSessionToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "sampleFileName",
+      "value": "contract.pdf",
+      "type": "string"
+    },
+    {
+      "key": "contentType",
+      "value": "application/pdf",
+      "type": "string"
+    },
+    {
+      "key": "localPdfPath",
+      "value": "/Users/luizcurti/node/event-driven-document-processing/postman/contract.pdf",
+      "type": "string"
+    },
+    {
+      "key": "idempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "documentId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "uploadUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "uploadKey",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}
