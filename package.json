@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",
+    "lint": "eslint .",
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -29,10 +30,14 @@
     "@aws-sdk/s3-request-presigner": "^3.883.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@types/aws-lambda": "^8.10.147",
     "@types/node": "^22.13.10",
     "@vitest/coverage-v8": "^2.1.8",
+    "eslint": "^9.39.5",
+    "globals": "^17.7.0",
     "typescript": "^5.8.2",
+    "typescript-eslint": "^8.64.0",
     "vitest": "^2.1.8"
   }
 }
