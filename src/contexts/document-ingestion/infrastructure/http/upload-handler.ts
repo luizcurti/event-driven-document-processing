@@ -7,6 +7,26 @@ import { ConsoleLogger } from "../../../../shared/infrastructure/logging/logger"
 
 const logger = new ConsoleLogger();
 
+function resolveStatusCode(error: unknown): number {
+  if (!(error instanceof Error)) {
+    return 500;
+  }
+
+  if (error.message.includes("already processed")) {
+    return 409;
+  }
+
+  if (
+    error.message.includes("not configured") ||
+    error.message.includes("missing ") ||
+    error.message.includes("Failed to process upload")
+  ) {
+    return 500;
+  }
+
+  return 400;
+}
+
 export async function uploadHandler(
   event: APIGatewayProxyEventV2
 ): Promise<APIGatewayProxyResultV2> {
@@ -60,11 +80,8 @@ export async function uploadHandler(
       error: error instanceof Error ? error.message : "unknown"
     });
 
-    const statusCode =
-      error instanceof Error && error.message.includes("already processed") ? 409 : 400;
-
     return {
-      statusCode,
+      statusCode: resolveStatusCode(error),
       body: JSON.stringify({
         message: error instanceof Error ? error.message : "Failed to process upload"
       })
