@@ -40,7 +40,7 @@ Diagram: `docs/diagram.png`
 
 - Node.js 22+
 - Docker + Docker Compose
-- Terraform 1.12+ (recomendado: release estável mais recente da série 1.x)
+- Terraform 1.12+
 
 ## Local Quick Start (LocalStack)
 
