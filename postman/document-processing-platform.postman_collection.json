@@ -291,7 +291,7 @@
     },
     {
       "key": "localPdfPath",
-      "value": "/Users/luizcurti/node/event-driven-document-processing/postman/contract.pdf",
+      "value": "/Users/luizcurti/node/event-driven/event-driven-document-processing/postman/contract.pdf",
       "type": "string"
     },
     {

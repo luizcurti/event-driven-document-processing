@@ -116,9 +116,10 @@ async function main() {
   runCmd("Reset LocalStack", "npm run localstack:down");
   runCmd("Start LocalStack", "npm run localstack:up");
   runCmd("Package lambdas", "npm run package:local");
+  runCmd("Initialize local Terraform", "terraform -chdir=infra/terraform init -input=false");
   runCmd(
     "Apply local Terraform",
-    "terraform -chdir=infra/terraform apply -auto-approve -var-file=environments/local.tfvars"
+    "terraform -chdir=infra/terraform apply -input=false -auto-approve -var-file=environments/local.tfvars"
   );
 
   let tfOutputRaw = "{}";

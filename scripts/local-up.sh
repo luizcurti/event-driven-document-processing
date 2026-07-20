@@ -12,8 +12,8 @@ fi
 
 npm run package:local
 npm run localstack:up
-terraform -chdir=infra/terraform init
-terraform -chdir=infra/terraform apply -auto-approve -var-file=environments/local.tfvars
+terraform -chdir=infra/terraform init -input=false
+terraform -chdir=infra/terraform apply -input=false -auto-approve -var-file=environments/local.tfvars
 
 echo "Local environment is ready."
 echo "Postman local collection: postman/document-processing-platform-local.postman_collection.json"

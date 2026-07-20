@@ -16,6 +16,7 @@
     "test:integration:local": "node tests/integration/local-e2e.mjs",
     "package:local": "npm run clean && npm run build && (cd dist && zip -rq lambda.zip .)",
     "local:setup": "./scripts/local-up.sh",
+    "local:teardown": "./scripts/local-down.sh",
     "local:check": "./scripts/local-check.sh",
     "localstack:up": "docker compose -f docker-compose.local.yml up -d",
     "localstack:down": "docker compose -f docker-compose.local.yml down -v"

@@ -71,14 +71,20 @@ npm run localstack:up
 
 ```bash
 cd infra/terraform
-terraform init
-terraform apply -auto-approve -var-file=environments/local.tfvars
+terraform init -input=false
+terraform apply -input=false -auto-approve -var-file=environments/local.tfvars
 ```
 
 Equivalent one-shot shell script:
 
 ```bash
 ./scripts/local-up.sh
+```
+
+To tear down local resources:
+
+```bash
+npm run local:teardown
 ```
 
 ### 3.1 Verify local resources quickly (recruiter-friendly)
@@ -259,9 +265,9 @@ Commands:
 
 ```bash
 cd infra/terraform
-terraform init
+terraform init -input=false
 terraform plan -var-file=environments/dev.tfvars
-terraform apply -var-file=environments/dev.tfvars
+terraform apply -input=false -var-file=environments/dev.tfvars
 ```
 
 ## Tests and Quality
