@@ -1,6 +1,9 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
-import { IdempotencyService } from "../../application/ports/idempotency-service";
+import {
+  AlreadyProcessedError,
+  IdempotencyService
+} from "../../application/ports/idempotency-service";
 import { getAwsClientConfig } from "../../../../shared/infrastructure/aws/aws-client-config";
 
 export class AwsDynamoIdempotencyService implements IdempotencyService {
@@ -11,10 +14,6 @@ export class AwsDynamoIdempotencyService implements IdempotencyService {
     ddbClient = new DynamoDBClient(getAwsClientConfig("dynamodb"))
   ) {
     this.docClient = DynamoDBDocumentClient.from(ddbClient);
-  }
-
-  async ensureNotProcessed(_key: string): Promise<void> {
-    // Deprecated by atomic markProcessed (conditional put).
   }
 
   async markProcessed(key: string): Promise<void> {
@@ -36,9 +35,27 @@ export class AwsDynamoIdempotencyService implements IdempotencyService {
         error instanceof Error &&
         error.name === "ConditionalCheckFailedException"
       ) {
-        throw new Error("Request already processed");
+        throw new AlreadyProcessedError(key);
       }
       throw error;
     }
+  }
+}
+
+/**
+ * Marks an event as processed and reports whether it is new.
+ * Consolidates the markProcessed/AlreadyProcessedError try-catch that was
+ * duplicated across every event-consuming Lambda (OCR, Thumbnail, Validation,
+ * Notification).
+ */
+export async function isNewEvent(tableName: string, eventId: string): Promise<boolean> {
+  try {
+    await new AwsDynamoIdempotencyService(tableName).markProcessed(eventId);
+    return true;
+  } catch (error) {
+    if (error instanceof AlreadyProcessedError) {
+      return false;
+    }
+    throw error;
   }
 }

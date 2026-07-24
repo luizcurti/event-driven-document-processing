@@ -1,19 +1,21 @@
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 import { UploadDocumentUseCase } from "../../application/use-cases/upload-document-use-case";
+import { AlreadyProcessedError } from "../../application/ports/idempotency-service";
 import { AwsDynamoIdempotencyService } from "../adapters/aws-dynamo-idempotency-service";
 import { AwsDynamoMetadataRepository } from "../adapters/aws-dynamo-metadata-repository";
 import { AwsS3ObjectStorage } from "../adapters/aws-s3-object-storage";
 import { ConsoleLogger } from "../../../../shared/infrastructure/logging/logger";
+import { requireEnv } from "../../../../shared/infrastructure/aws/aws-client-config";
 
 const logger = new ConsoleLogger();
 
 function resolveStatusCode(error: unknown): number {
-  if (!(error instanceof Error)) {
-    return 500;
+  if (error instanceof AlreadyProcessedError) {
+    return 409;
   }
 
-  if (error.message.includes("already processed")) {
-    return 409;
+  if (!(error instanceof Error)) {
+    return 500;
   }
 
   if (
@@ -37,17 +39,16 @@ export async function uploadHandler(
       event.headers["x-idempotency-key"] ||
       event.headers["X-Idempotency-Key"] ||
       `local-${Date.now()}`;
-    const metadataTable = process.env.DOCUMENTS_METADATA_TABLE ?? "";
+    const metadataTable = requireEnv(
+      process.env.DOCUMENTS_METADATA_TABLE,
+      "DOCUMENTS_METADATA_TABLE not configured"
+    );
     const fileName = typeof body.fileName === "string" ? body.fileName.trim() : "";
     const contentType =
       typeof body.contentType === "string" && body.contentType.trim().length > 0
         ? body.contentType
         : "application/pdf";
     const documentId = typeof body.documentId === "string" ? body.documentId.trim() : "";
-
-    if (!metadataTable) {
-      throw new Error("DOCUMENTS_METADATA_TABLE not configured");
-    }
 
     if (!fileName) {
       throw new Error("Invalid payload: fileName is required");

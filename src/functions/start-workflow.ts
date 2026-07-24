@@ -1,6 +1,6 @@
 import { Handler } from "aws-lambda";
 import { StartExecutionCommand, SFNClient } from "@aws-sdk/client-sfn";
-import { getAwsClientConfig } from "../shared/infrastructure/aws/aws-client-config";
+import { getAwsClientConfig, requireEnv } from "../shared/infrastructure/aws/aws-client-config";
 
 type UploadEvent = {
   bucket: string;
@@ -24,11 +24,10 @@ function resolveDocumentId(event: UploadEvent): string {
 }
 
 export const handler: Handler<UploadEvent> = async (event) => {
-  const stateMachineArn = event.stateMachineArn ?? process.env.STEP_FUNCTIONS_ARN ?? "";
-
-  if (!stateMachineArn) {
-    throw new Error("Lambda missing STEP_FUNCTIONS_ARN");
-  }
+  const stateMachineArn = requireEnv(
+    event.stateMachineArn ?? process.env.STEP_FUNCTIONS_ARN,
+    "Lambda missing STEP_FUNCTIONS_ARN"
+  );
 
   const documentId = resolveDocumentId(event);
 

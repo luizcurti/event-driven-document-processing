@@ -49,7 +49,6 @@ describe("use cases", () => {
       })
     };
     const idempotency = {
-      ensureNotProcessed: vi.fn(async () => undefined),
       markProcessed: vi.fn(async () => {
         sequence.push("markProcessed");
       })
@@ -94,7 +93,6 @@ describe("use cases", () => {
       generateUploadUrl: vi.fn(async () => "https://example.local/upload-url")
     };
     const idempotency = {
-      ensureNotProcessed: vi.fn(async () => undefined),
       markProcessed: vi.fn(async () => undefined)
     };
 
@@ -241,7 +239,6 @@ describe("use cases", () => {
         generateUploadUrl: vi.fn(async () => "https://example.local/upload-url")
       },
       {
-        ensureNotProcessed: vi.fn(async () => undefined),
         markProcessed: vi.fn(async () => undefined)
       }
     );

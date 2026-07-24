@@ -1,6 +1,6 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
-import { MetadataRepository } from "../../application/ports/metadata-repository";
+import { DocumentStatusRecord, MetadataRepository } from "../../application/ports/metadata-repository";
 import { Document } from "../../domain/entities/document";
 import { getAwsClientConfig } from "../../../../shared/infrastructure/aws/aws-client-config";
 
@@ -35,16 +35,7 @@ export class AwsDynamoMetadataRepository implements MetadataRepository {
     );
   }
 
-  async findByDocumentId(documentId: string): Promise<
-    | {
-        documentId: string;
-        status: string;
-        createdAt?: string;
-        updatedAt?: string;
-        errorMessage?: string;
-      }
-    | null
-  > {
+  async findByDocumentId(documentId: string): Promise<DocumentStatusRecord | null> {
     const [metadataResult, processingResult] = await Promise.all([
       this.docClient.send(
         new GetCommand({

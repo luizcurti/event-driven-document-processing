@@ -22,6 +22,18 @@ function resolveEndpoint(serviceName: string): string | undefined {
   return process.env.AWS_ENDPOINT_URL;
 }
 
+/**
+ * Reads a required environment/config value or throws with the given message.
+ * Consolidates the repeated `if (!value) throw new Error(...)` guard used by
+ * every Lambda handler.
+ */
+export function requireEnv(value: string | undefined, message: string): string {
+  if (!value) {
+    throw new Error(message);
+  }
+  return value;
+}
+
 export function getAwsClientConfig(serviceName: string): {
   region?: string;
   endpoint?: string;
