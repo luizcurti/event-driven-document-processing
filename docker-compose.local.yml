@@ -1,6 +1,6 @@
 services:
   localstack:
-    image: localstack/localstack:3.8.1
+    image: localstack/localstack:4.1.1
     container_name: document-processing-localstack
     ports:
       - "4566:4566"
