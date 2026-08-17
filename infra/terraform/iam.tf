@@ -10,98 +10,40 @@ data "aws_iam_policy_document" "lambda_assume_role" {
   }
 }
 
+# Each Lambda gets its own execution role, scoped in locals.lambda_iam_statements to
+# only the actions/resources that function actually needs (e.g. the OCR Lambda gets
+# s3:GetObject, never s3:*; merge_results gets no resource access at all).
 resource "aws_iam_role" "lambda_execution" {
-  name               = "${local.name_prefix}-lambda-execution"
+  for_each           = local.lambda_config
+  name               = "${local.name_prefix}-${replace(each.key, "_", "-")}-execution"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
   tags               = local.tags
 }
 
 resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
-  role       = aws_iam_role.lambda_execution.name
+  for_each   = local.lambda_config
+  role       = aws_iam_role.lambda_execution[each.key].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
 data "aws_iam_policy_document" "lambda_custom_access" {
-  statement {
-    sid = "S3Access"
-    actions = [
-      "s3:PutObject",
-      "s3:GetObject"
-    ]
-    resources = [
-      "${aws_s3_bucket.documents.arn}/*"
-    ]
-  }
+  for_each = local.lambda_iam_statements_nonempty
 
-  statement {
-    sid = "DynamoAccess"
-    actions = [
-      "dynamodb:GetItem",
-      "dynamodb:PutItem",
-      "dynamodb:UpdateItem"
-    ]
-    resources = [aws_dynamodb_table.documents_metadata.arn]
-  }
-
-  statement {
-    sid = "QueueAccess"
-    actions = [
-      "sqs:SendMessage",
-      "sqs:ReceiveMessage",
-      "sqs:DeleteMessage",
-      "sqs:GetQueueAttributes"
-    ]
-    resources = [
-      aws_sqs_queue.notifications.arn,
-      aws_sqs_queue.notifications_dlq.arn
-    ]
-  }
-
-  statement {
-    sid = "TextractAccess"
-    actions = [
-      "textract:DetectDocumentText",
-      "textract:StartDocumentTextDetection",
-      "textract:GetDocumentTextDetection"
-    ]
-    resources = ["*"]
-  }
-
-  statement {
-    sid = "StepFunctionsCallbackAccess"
-    actions = [
-      "states:StartExecution",
-      "states:SendTaskSuccess",
-      "states:SendTaskFailure"
-    ]
-    resources = ["*"]
-  }
-
-  statement {
-    sid = "SnsPublishAccess"
-    actions = [
-      "sns:Publish"
-    ]
-    resources = [aws_sns_topic.notifications.arn]
-  }
-
-  statement {
-    sid = "KmsUsage"
-    actions = [
-      "kms:Encrypt",
-      "kms:Decrypt",
-      "kms:ReEncrypt*",
-      "kms:GenerateDataKey*",
-      "kms:DescribeKey"
-    ]
-    resources = [aws_kms_key.platform.arn]
+  dynamic "statement" {
+    for_each = each.value
+    content {
+      sid       = statement.value.sid
+      actions   = statement.value.actions
+      resources = statement.value.resources
+    }
   }
 }
 
 resource "aws_iam_role_policy" "lambda_custom_access" {
-  name   = "${local.name_prefix}-lambda-custom-access"
-  role   = aws_iam_role.lambda_execution.id
-  policy = data.aws_iam_policy_document.lambda_custom_access.json
+  for_each = local.lambda_iam_statements_nonempty
+  name     = "${local.name_prefix}-${replace(each.key, "_", "-")}-custom-access"
+  role     = aws_iam_role.lambda_execution[each.key].id
+  policy   = data.aws_iam_policy_document.lambda_custom_access[each.key].json
 }
 
 data "aws_iam_policy_document" "step_functions_assume_role" {
@@ -127,7 +69,7 @@ data "aws_iam_policy_document" "step_functions_invoke_lambdas" {
   statement {
     actions = ["lambda:InvokeFunction"]
     resources = [
-      for fn in aws_lambda_function.this : fn.arn
+      for key, fn in aws_lambda_function.this : fn.arn if key != "ocr_callback"
     ]
   }
 }
@@ -138,4 +80,3 @@ resource "aws_iam_role_policy" "step_functions_invoke_lambdas" {
   role   = aws_iam_role.step_functions[0].id
   policy = data.aws_iam_policy_document.step_functions_invoke_lambdas[0].json
 }
-

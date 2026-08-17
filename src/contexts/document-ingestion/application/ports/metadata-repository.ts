@@ -10,5 +10,6 @@ export interface DocumentStatusRecord {
 
 export interface MetadataRepository {
   saveInitial(document: Document): Promise<void>;
+  markProcessing(documentId: string): Promise<void>;
   findByDocumentId(documentId: string): Promise<DocumentStatusRecord | null>;
 }

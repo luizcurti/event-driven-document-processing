@@ -2,7 +2,7 @@ resource "aws_lambda_function" "this" {
   for_each = local.lambda_config
 
   function_name = "${local.name_prefix}-${each.key}"
-  role          = aws_iam_role.lambda_execution.arn
+  role          = aws_iam_role.lambda_execution[each.key].arn
   package_type  = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? "Image" : "Zip"
   runtime       = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "local" ? "nodejs20.x" : "nodejs22.x")
   handler       = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : each.value.handler
@@ -21,15 +21,21 @@ resource "aws_lambda_function" "this" {
   kms_key_arn      = aws_kms_key.platform.arn
 
   environment {
-    variables = {
-      DOCUMENTS_BUCKET         = aws_s3_bucket.documents.bucket
-      DOCUMENTS_METADATA_TABLE = aws_dynamodb_table.documents_metadata.name
-      NOTIFICATION_QUEUE_URL   = aws_sqs_queue.notifications.url
-      NOTIFICATION_TOPIC_ARN   = aws_sns_topic.notifications.arn
-      ENVIRONMENT              = var.environment
-      AWS_EXECUTION_MODE       = var.deployment_mode
-      AWS_ENDPOINT_URL         = var.deployment_mode == "local" ? "http://localhost.localstack.cloud:4566" : ""
-    }
+    variables = merge(
+      {
+        DOCUMENTS_BUCKET         = aws_s3_bucket.documents.bucket
+        DOCUMENTS_METADATA_TABLE = aws_dynamodb_table.documents_metadata.name
+        NOTIFICATION_QUEUE_URL   = aws_sqs_queue.notifications.url
+        NOTIFICATION_TOPIC_ARN   = aws_sns_topic.notifications.arn
+        ENVIRONMENT              = var.environment
+        AWS_EXECUTION_MODE       = var.deployment_mode
+        AWS_ENDPOINT_URL         = var.deployment_mode == "local" ? "http://localhost.localstack.cloud:4566" : ""
+      },
+      each.key == "ocr" ? {
+        TEXTRACT_ROLE_ARN  = aws_iam_role.textract_service.arn
+        TEXTRACT_TOPIC_ARN = aws_sns_topic.textract_completion.arn
+      } : {}
+    )
   }
 
   tags = merge(local.tags, {

@@ -1,7 +1,8 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { DocumentStatusRecord, MetadataRepository } from "../../application/ports/metadata-repository";
 import { Document } from "../../domain/entities/document";
+import { DocumentStatus } from "../../../../shared/domain/document-status";
 import { getAwsClientConfig } from "../../../../shared/infrastructure/aws/aws-client-config";
 
 export class AwsDynamoMetadataRepository implements MetadataRepository {
@@ -30,6 +31,24 @@ export class AwsDynamoMetadataRepository implements MetadataRepository {
           status: payload.status,
           createdAt: payload.createdAt,
           updatedAt: payload.createdAt
+        }
+      })
+    );
+  }
+
+  async markProcessing(documentId: string): Promise<void> {
+    await this.docClient.send(
+      new UpdateCommand({
+        TableName: this.tableName,
+        Key: {
+          pk: `DOCUMENT#${documentId}`,
+          sk: "METADATA"
+        },
+        UpdateExpression: "SET #status = :status, updatedAt = :now",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":status": DocumentStatus.PROCESSING,
+          ":now": new Date().toISOString()
         }
       })
     );

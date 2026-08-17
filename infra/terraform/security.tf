@@ -19,8 +19,11 @@ data "aws_iam_policy_document" "kms_key" {
     effect = "Allow"
 
     principals {
-      type        = "AWS"
-      identifiers = [aws_iam_role.lambda_execution.arn]
+      type = "AWS"
+      identifiers = concat(
+        [for role in aws_iam_role.lambda_execution : role.arn],
+        [aws_iam_role.textract_service.arn]
+      )
     }
 
     actions = [

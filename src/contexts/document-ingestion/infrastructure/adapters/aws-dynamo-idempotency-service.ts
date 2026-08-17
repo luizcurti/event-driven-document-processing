@@ -1,61 +1,111 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
-import {
-  AlreadyProcessedError,
-  IdempotencyService
-} from "../../application/ports/idempotency-service";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { IdempotencyService } from "../../application/ports/idempotency-service";
 import { getAwsClientConfig } from "../../../../shared/infrastructure/aws/aws-client-config";
 
-export class AwsDynamoIdempotencyService implements IdempotencyService {
-  private readonly docClient: DynamoDBDocumentClient;
-
-  constructor(
-    private readonly tableName: string,
-    ddbClient = new DynamoDBClient(getAwsClientConfig("dynamodb"))
-  ) {
-    this.docClient = DynamoDBDocumentClient.from(ddbClient);
-  }
-
-  async markProcessed(key: string): Promise<void> {
-    try {
-      await this.docClient.send(
-        new PutCommand({
-          TableName: this.tableName,
-          Item: {
-            pk: `IDEMPOTENCY#${key}`,
-            sk: "REQUEST",
-            entityType: "IDEMPOTENCY",
-            createdAt: new Date().toISOString()
-          },
-          ConditionExpression: "attribute_not_exists(pk)"
-        })
-      );
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.name === "ConditionalCheckFailedException"
-      ) {
-        throw new AlreadyProcessedError(key);
-      }
-      throw error;
-    }
-  }
+function idempotencyKey(key: string) {
+  return { pk: `IDEMPOTENCY#${key}`, sk: "REQUEST" };
 }
 
 /**
- * Marks an event as processed and reports whether it is new.
- * Consolidates the markProcessed/AlreadyProcessedError try-catch that was
- * duplicated across every event-consuming Lambda (OCR, Thumbnail, Validation,
- * Notification).
+ * Claims `key` atomically (PutItem + ConditionExpression, never a read-then-decide
+ * race) before running `work`, and stores the result once `work` succeeds. A
+ * duplicate call with a key that already finished returns the stored result without
+ * re-running `work`. A duplicate call that arrives while the original attempt is
+ * still `IN_PROGRESS` (still running, or died before completing) re-runs `work` —
+ * this is what makes Step Functions/SQS retries after a genuine transient failure
+ * actually retry, instead of returning a fabricated success.
  */
-export async function isNewEvent(tableName: string, eventId: string): Promise<boolean> {
+export async function withIdempotency<T>(
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+  key: string,
+  work: () => Promise<T>
+): Promise<T> {
+  const claimed = await tryClaim(docClient, tableName, key);
+
+  if (!claimed) {
+    const existing = await docClient.send(
+      new GetCommand({ TableName: tableName, Key: idempotencyKey(key) })
+    );
+
+    if (existing.Item?.status === "COMPLETED") {
+      return existing.Item.result as T;
+    }
+    // status is IN_PROGRESS (or the record vanished): the original attempt never
+    // finished, so fall through and actually do the work instead of faking success.
+  }
+
+  const result = await work();
+
+  await docClient.send(
+    new UpdateCommand({
+      TableName: tableName,
+      Key: idempotencyKey(key),
+      UpdateExpression: "SET #status = :completed, #result = :result, completedAt = :now",
+      ExpressionAttributeNames: { "#status": "status", "#result": "result" },
+      ExpressionAttributeValues: {
+        ":completed": "COMPLETED",
+        ":result": result,
+        ":now": new Date().toISOString()
+      }
+    })
+  );
+
+  return result;
+}
+
+async function tryClaim(
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+  key: string
+): Promise<boolean> {
   try {
-    await new AwsDynamoIdempotencyService(tableName).markProcessed(eventId);
+    await docClient.send(
+      new PutCommand({
+        TableName: tableName,
+        Item: {
+          ...idempotencyKey(key),
+          entityType: "IDEMPOTENCY",
+          status: "IN_PROGRESS",
+          createdAt: new Date().toISOString()
+        },
+        ConditionExpression: "attribute_not_exists(pk)"
+      })
+    );
     return true;
   } catch (error) {
-    if (error instanceof AlreadyProcessedError) {
+    if (error instanceof Error && error.name === "ConditionalCheckFailedException") {
       return false;
     }
     throw error;
   }
+}
+
+export class AwsDynamoIdempotencyService implements IdempotencyService {
+  constructor(
+    private readonly tableName: string,
+    private readonly docClient: DynamoDBDocumentClient = DynamoDBDocumentClient.from(
+      new DynamoDBClient(getAwsClientConfig("dynamodb"))
+    )
+  ) {}
+
+  withIdempotency<T>(key: string, work: () => Promise<T>): Promise<T> {
+    return withIdempotency(this.docClient, this.tableName, key, work);
+  }
+}
+
+/**
+ * Lambda-handler convenience wrapper around `withIdempotency` that owns its own
+ * DynamoDB client, for the event-consuming Lambdas (OCR, Thumbnail, Validation,
+ * Notification) that don't go through the ports/DI wiring used by the upload use case.
+ * `docClient` is only ever overridden in tests; handlers call this with 3 arguments.
+ */
+export function runIdempotent<T>(
+  tableName: string,
+  eventId: string,
+  work: () => Promise<T>,
+  docClient?: DynamoDBDocumentClient
+): Promise<T> {
+  return new AwsDynamoIdempotencyService(tableName, docClient).withIdempotency(eventId, work);
 }

@@ -1,6 +1,5 @@
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 import { UploadDocumentUseCase } from "../../application/use-cases/upload-document-use-case";
-import { AlreadyProcessedError } from "../../application/ports/idempotency-service";
 import { AwsDynamoIdempotencyService } from "../adapters/aws-dynamo-idempotency-service";
 import { AwsDynamoMetadataRepository } from "../adapters/aws-dynamo-metadata-repository";
 import { AwsS3ObjectStorage } from "../adapters/aws-s3-object-storage";
@@ -10,10 +9,6 @@ import { requireEnv } from "../../../../shared/infrastructure/aws/aws-client-con
 const logger = new ConsoleLogger();
 
 function resolveStatusCode(error: unknown): number {
-  if (error instanceof AlreadyProcessedError) {
-    return 409;
-  }
-
   if (!(error instanceof Error)) {
     return 500;
   }
@@ -33,11 +28,16 @@ export async function uploadHandler(
   event: APIGatewayProxyEventV2
 ): Promise<APIGatewayProxyResultV2> {
   try {
-    const body = event.body ? JSON.parse(event.body) : {};
+    let body: Record<string, unknown>;
+    try {
+      body = event.body ? JSON.parse(event.body) : {};
+    } catch {
+      throw new Error("Invalid payload: body must be valid JSON");
+    }
     const requestId =
-      event.requestContext.requestId ||
       event.headers["x-idempotency-key"] ||
       event.headers["X-Idempotency-Key"] ||
+      event.requestContext.requestId ||
       `local-${Date.now()}`;
     const metadataTable = requireEnv(
       process.env.DOCUMENTS_METADATA_TABLE,

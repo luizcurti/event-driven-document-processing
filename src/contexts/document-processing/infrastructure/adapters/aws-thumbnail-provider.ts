@@ -4,10 +4,15 @@ import {
   S3Client
 } from "@aws-sdk/client-s3";
 import { ThumbnailProvider } from "../../application/ports/thumbnail-provider";
+import { ThumbnailResult } from "../../../../shared/contracts/events";
 import {
   getAwsClientConfig,
   isLocalAwsMode
 } from "../../../../shared/infrastructure/aws/aws-client-config";
+import { createPlaceholderPng } from "./png-placeholder";
+
+const THUMBNAIL_WIDTH = 320;
+const THUMBNAIL_HEIGHT = 200;
 
 export class AwsThumbnailProvider implements ThumbnailProvider {
   constructor(
@@ -17,11 +22,7 @@ export class AwsThumbnailProvider implements ThumbnailProvider {
     })
   ) {}
 
-  async generate(
-    documentId: string,
-    bucket: string,
-    key: string
-  ): Promise<{ thumbnailKey: string; width: number; height: number }> {
+  async generate(documentId: string, bucket: string, key: string): Promise<ThumbnailResult> {
     await this.s3Client.send(
       new HeadObjectCommand({
         Bucket: bucket,
@@ -29,25 +30,28 @@ export class AwsThumbnailProvider implements ThumbnailProvider {
       })
     );
 
-    const thumbnailKey = `thumbnails/${documentId}.json`;
+    const prefix = `thumbnails/${documentId}`;
+    const pageKeys = [`${prefix}/page-1.png`, `${prefix}/page-2.png`];
+    const thumbnailKey = `${prefix}/preview.png`;
 
-    await this.s3Client.send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: thumbnailKey,
-        ContentType: "application/json",
-        Body: JSON.stringify({
-          generatedFrom: key,
-          generatedAt: new Date().toISOString(),
-          note: "Placeholder de thumbnail. Substituir por pipeline de imagem real."
-        })
-      })
+    await Promise.all(
+      [...pageKeys, thumbnailKey].map((imageKey) =>
+        this.s3Client.send(
+          new PutObjectCommand({
+            Bucket: bucket,
+            Key: imageKey,
+            ContentType: "image/png",
+            Body: createPlaceholderPng(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
+          })
+        )
+      )
     );
 
     return {
       thumbnailKey,
-      width: 320,
-      height: 200
+      width: THUMBNAIL_WIDTH,
+      height: THUMBNAIL_HEIGHT,
+      pageKeys
     };
   }
 }

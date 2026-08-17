@@ -6,7 +6,10 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],
-      include: ["src/contexts/**/application/use-cases/*.ts"],
+      include: [
+        "src/contexts/**/application/use-cases/*.ts",
+        "src/contexts/document-ingestion/infrastructure/adapters/aws-dynamo-idempotency-service.ts"
+      ],
       all: true,
       thresholds: {
         lines: 100,

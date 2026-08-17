@@ -1,5 +1,6 @@
 import { Handler } from "aws-lambda";
 import { StartExecutionCommand, SFNClient } from "@aws-sdk/client-sfn";
+import { AwsDynamoMetadataRepository } from "../contexts/document-ingestion/infrastructure/adapters/aws-dynamo-metadata-repository";
 import { getAwsClientConfig, requireEnv } from "../shared/infrastructure/aws/aws-client-config";
 
 type UploadEvent = {
@@ -49,6 +50,12 @@ export const handler: Handler<UploadEvent> = async (event) => {
     }
     throw error;
   }
+
+  const metadataTable = requireEnv(
+    process.env.DOCUMENTS_METADATA_TABLE,
+    "Lambda missing DOCUMENTS_METADATA_TABLE"
+  );
+  await new AwsDynamoMetadataRepository(metadataTable).markProcessing(documentId);
 
   return { ok: true, documentId };
 };

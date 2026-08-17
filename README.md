@@ -7,16 +7,17 @@ Serverless, event-driven PDF processing platform built with Node.js, TypeScript,
 Main flow:
 
 1. `POST /documents` on API Gateway invokes the Upload Lambda.
-2. The Upload Lambda validates the input, generates a `documentId`, saves the initial metadata in DynamoDB, and returns an `uploadUrl` (S3 presigned URL).
+2. The Upload Lambda validates the input, generates a `documentId`, saves the initial metadata in DynamoDB, and returns an `uploadUrl` (S3 presigned URL). The whole operation runs once per `requestId`/idempotency key via an atomic claim-and-cache pattern (see "Idempotency" below).
 3. The client uploads the PDF to S3 using the `uploadUrl`.
-4. The S3 `Object Created` event reaches EventBridge.
-5. EventBridge starts Step Functions.
-6. Step Functions runs OCR, Thumbnail, and Validation in parallel.
-7. Merge Results consolidates the data.
-8. The Metadata Lambda persists the final result in DynamoDB and publishes an event to SQS.
-9. The Notification Lambda consumes SQS and publishes to SNS.
+4. The S3 `Object Created` event reaches EventBridge, which starts Step Functions (execution name = `documentId`) and also marks the document `PROCESSING` in DynamoDB.
+5. Step Functions runs OCR, Thumbnail, and Validation in parallel.
+   - OCR is genuinely asynchronous in cloud mode: the OCR Lambda calls `Textract.StartDocumentTextDetection` and returns immediately; a `waitForTaskToken` state pauses that branch. Textract publishes job completion to an SNS topic, which invokes a dedicated `ocr-callback` Lambda that fetches the result and resolves the task token (`SendTaskSuccess`/`SendTaskFailure`). In local mode (no Textract in LocalStack Community), the OCR Lambda resolves synchronously with a mock result instead.
+   - Thumbnail writes real (placeholder, solid-color) PNG images to `thumbnails/{documentId}/page-1.png`, `page-2.png`, and `preview.png`. Pixel-accurate PDF rendering still requires the poppler/sharp/chromium container-image pipeline described in the spec — this placeholder produces genuine image artifacts at the right keys without that native-binary dependency.
+6. Merge Results consolidates the data.
+7. The Metadata Lambda persists the final result in DynamoDB and publishes an event to SQS.
+8. The Notification Lambda consumes SQS and publishes to SNS.
 
-Important: there is a single DynamoDB table for documents (`documents-metadata`), updated in two moments: initial creation (upload) and final result/failure (post-processing).
+Important: there is a single DynamoDB table for documents (`documents-metadata`), updated at several moments: initial creation (upload), `PROCESSING` (workflow start), and final result/failure (post-processing).
 
 Diagram: `docs/diagram.png`
 
@@ -28,6 +29,7 @@ Diagram: `docs/diagram.png`
 - S3
 - EventBridge
 - Step Functions
+- Textract (async OCR)
 - DynamoDB
 - SQS + DLQ
 - SNS
@@ -35,6 +37,29 @@ Diagram: `docs/diagram.png`
 - KMS
 - WAF (enabled in cloud; optional locally)
 - Terraform
+
+## Idempotency
+
+Every event-consuming Lambda (Upload, OCR, Thumbnail, Validation, Notification) runs its
+work through an atomic claim-and-cache helper (`withIdempotency`), backed by a single
+conditional DynamoDB write — never a read-then-decide race:
+
+1. Atomically claim the idempotency key (`PutItem` with `ConditionExpression:
+   attribute_not_exists(pk)`, status `IN_PROGRESS`).
+2. If the claim fails because the key already exists, read the existing record. If its
+   status is `COMPLETED`, return the cached result without re-running the work. If it is
+   still `IN_PROGRESS` (the original attempt crashed or is still running), fall through
+   and actually run the work — this is what makes Step Functions/SQS retries after a
+   real transient failure retry the operation, instead of returning a fabricated
+   success.
+3. On success, atomically mark the record `COMPLETED` with the result attached.
+
+## IAM
+
+Each Lambda has its own execution role, scoped in Terraform (`locals.lambda_iam_statements`)
+to only the actions/resources that function needs — e.g. the OCR Lambda gets
+`s3:GetObject`, never `s3:*`; `merge_results` (a pure function) gets no resource access
+at all beyond CloudWatch Logs.
 
 ## Prerequisites
 
@@ -251,6 +276,7 @@ The Lambdas receive the following values via Terraform:
 - `NOTIFICATION_TOPIC_ARN`
 - `AWS_EXECUTION_MODE` (`cloud` or `local`)
 - `AWS_ENDPOINT_URL` (local only)
+- `TEXTRACT_ROLE_ARN`, `TEXTRACT_TOPIC_ARN` (OCR Lambda only — used to start the async Textract job with an SNS completion notification)
 
 ## Cloud Deployment
 
@@ -274,20 +300,36 @@ terraform apply -input=false -var-file=environments/dev.tfvars
 
 ```bash
 npm run check
+npm run lint
 npm run test
 npm run test:coverage
 ```
 
+CI (`.github/workflows/ci.yml`) also runs `terraform fmt -check` and `terraform validate`
+on every push/PR. It does not run `terraform plan`/`apply`, since that needs
+environment-specific AWS credentials this repo doesn't provision.
+
 Coverage target:
 
-- 100% for lines, functions, branches, and statements.
+- 100% for lines, functions, branches, and statements, enforced on
+  `src/contexts/**/application/use-cases/*.ts` and the idempotency adapter
+  (`aws-dynamo-idempotency-service.ts`) — the use-case layer and the atomic
+  claim/cache logic behind every idempotency guarantee in the system. The Lambda
+  handlers in `src/functions/` and the AWS adapters are exercised by the local
+  integration flow (`npm run test:integration:local`) and the Postman/Newman
+  collection, but are not yet part of the enforced unit-coverage set.
 
 ## Project Notes
 
-- Upload idempotency uses `requestId`/`x-idempotency-key` in DynamoDB.
+- Upload idempotency prefers the `x-idempotency-key` header (the actual client-supplied
+  retry key) over `requestContext.requestId` (which is unique per HTTP request in a real
+  API Gateway deployment, so it can't dedupe client retries on its own). Both are wrapped
+  in the same atomic claim-and-cache flow described above: a genuine duplicate request
+  gets the original cached response back (`200`), not a `409`.
 - Step Functions retries only transient errors (`Lambda.ServiceException`, `Lambda.TooManyRequestsException`, `States.Timeout`).
 - The notification queue has a DLQ configured with `maxReceiveCount = 3`.
 - The notification queue visibility timeout is set to 120 seconds.
-- In local mode, OCR uses a mock fallback to avoid unsupported service dependencies.
+- In local mode, OCR uses a mock fallback to avoid unsupported service dependencies (LocalStack Community has no Textract support). In cloud mode, OCR is genuinely asynchronous — see "Architecture" above.
+- The local presigned upload URL uses the `localhost.localstack.cloud` hostname, which resolves via public DNS to `127.0.0.1`. In network-restricted environments (offline dev, some CI runners/sandboxes) that lookup can fail even though LocalStack itself is reachable on `127.0.0.1:4566` — if `PUT` to the presigned URL fails with a DNS error, add a hosts-file entry (or an equivalent DNS override) for that hostname rather than assuming LocalStack is down.
 
 Local default endpoint: `http://127.0.0.1:4566`. To test with a real HTTP API, run in AWS (`deployment_mode = "cloud"`) or use a LocalStack edition with `apigatewayv2` support.

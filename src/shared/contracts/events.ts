@@ -14,6 +14,7 @@ export interface ThumbnailResult {
   thumbnailKey: string;
   width: number;
   height: number;
+  pageKeys?: string[];
 }
 
 export interface ValidationResult {

@@ -35,12 +35,13 @@ describe("use cases", () => {
     expect(repository.findByDocumentId).toHaveBeenCalledWith("doc-12345");
   });
 
-  it("persists metadata, stores the object, and marks idempotency on upload", async () => {
+  it("persists metadata, stores the object, and runs the upload atomically once per requestId", async () => {
     const sequence: string[] = [];
     const metadataRepository = {
       saveInitial: vi.fn(async () => {
         sequence.push("saveInitial");
-      })
+      }),
+      markProcessing: vi.fn(async () => undefined)
     };
     const objectStorage = {
       generateUploadUrl: vi.fn(async () => {
@@ -49,8 +50,9 @@ describe("use cases", () => {
       })
     };
     const idempotency = {
-      markProcessed: vi.fn(async () => {
-        sequence.push("markProcessed");
+      withIdempotency: vi.fn(async (key: string, work: () => Promise<unknown>) => {
+        sequence.push(`claim:${key}`);
+        return work();
       })
     };
 
@@ -81,19 +83,52 @@ describe("use cases", () => {
       key: "doc-12345/invoice.pdf",
       contentType: "application/pdf"
     });
-    expect(idempotency.markProcessed).toHaveBeenCalledWith("req-123");
-    expect(sequence).toEqual(["markProcessed", "saveInitial", "generateUploadUrl"]);
+    expect(idempotency.withIdempotency).toHaveBeenCalledWith("req-123", expect.any(Function));
+    expect(sequence).toEqual(["claim:req-123", "saveInitial", "generateUploadUrl"]);
+  });
+
+  it("returns the cached response for a duplicate requestId without redoing the work", async () => {
+    const cachedResponse = {
+      documentId: "doc-cached",
+      key: "doc-cached/invoice.pdf",
+      uploadUrl: "https://example.local/original-upload-url"
+    };
+    const metadataRepository = {
+      saveInitial: vi.fn(async () => undefined),
+      markProcessing: vi.fn(async () => undefined)
+    };
+    const objectStorage = {
+      generateUploadUrl: vi.fn(async () => "https://example.local/should-not-be-called")
+    };
+    const idempotency = {
+      withIdempotency: vi.fn(async () => cachedResponse)
+    };
+
+    const useCase = new UploadDocumentUseCase(metadataRepository, objectStorage, idempotency);
+
+    const result = await useCase.execute({
+      requestId: "req-dup",
+      documentId: "doc-cached",
+      fileName: "invoice.pdf",
+      contentType: "application/pdf",
+      bucket: "bucket-a"
+    });
+
+    expect(result).toEqual(cachedResponse);
+    expect(metadataRepository.saveInitial).not.toHaveBeenCalled();
+    expect(objectStorage.generateUploadUrl).not.toHaveBeenCalled();
   });
 
   it("generates a documentId when one is not provided", async () => {
     const metadataRepository = {
-      saveInitial: vi.fn(async () => undefined)
+      saveInitial: vi.fn(async () => undefined),
+      markProcessing: vi.fn(async () => undefined)
     };
     const objectStorage = {
       generateUploadUrl: vi.fn(async () => "https://example.local/upload-url")
     };
     const idempotency = {
-      markProcessed: vi.fn(async () => undefined)
+      withIdempotency: vi.fn(async (_key: string, work: () => Promise<unknown>) => work())
     };
 
     const useCase = new UploadDocumentUseCase(
@@ -131,7 +166,7 @@ describe("use cases", () => {
     };
 
     const ocrProvider = {
-      extractText: vi.fn(async () => ({ textPreview: "abc", confidence: 0.91 }))
+      startExtraction: vi.fn(async () => ({ textPreview: "abc", confidence: 0.91 }))
     };
     const thumbnailProvider = {
       generate: vi.fn(async () => ({
@@ -158,11 +193,7 @@ describe("use cases", () => {
     });
     expect(validationResult).toEqual({ valid: true, reasons: [] });
 
-    expect(ocrProvider.extractText).toHaveBeenCalledWith(
-      "doc-12345",
-      "bucket-a",
-      "doc-12345/invoice.pdf"
-    );
+    expect(ocrProvider.startExtraction).toHaveBeenCalledWith(request);
     expect(thumbnailProvider.generate).toHaveBeenCalledWith(
       "doc-12345",
       "bucket-a",
@@ -233,13 +264,14 @@ describe("use cases", () => {
 
     const upload = new UploadDocumentUseCase(
       {
-        saveInitial: vi.fn(async () => undefined)
+        saveInitial: vi.fn(async () => undefined),
+        markProcessing: vi.fn(async () => undefined)
       },
       {
         generateUploadUrl: vi.fn(async () => "https://example.local/upload-url")
       },
       {
-        markProcessed: vi.fn(async () => undefined)
+        withIdempotency: vi.fn(async (_key: string, work: () => Promise<unknown>) => work())
       }
     );
 
@@ -258,7 +290,7 @@ describe("use cases", () => {
     };
 
     const ocr = await new ProcessOcrUseCase({
-      extractText: vi.fn(async () => ({ textPreview: "texto", confidence: 0.95 }))
+      startExtraction: vi.fn(async () => ({ textPreview: "texto", confidence: 0.95 }))
     }).execute(request);
 
     const thumbnail = await new ProcessThumbnailUseCase({

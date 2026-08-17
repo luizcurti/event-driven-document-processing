@@ -23,25 +23,26 @@ export class UploadDocumentUseCase {
   async execute(
     command: UploadDocumentCommand
   ): Promise<{ documentId: string; key: string; uploadUrl: string }> {
-    await this.idempotencyService.markProcessed(command.requestId);
-
     const documentId = command.documentId?.trim() || randomUUID();
     const key = `${documentId}/${command.fileName}`;
-    const document = Document.create({
-      id: documentId,
-      originalFileName: command.fileName,
-      contentType: command.contentType,
-      status: DocumentStatus.RECEIVED
+
+    return this.idempotencyService.withIdempotency(command.requestId, async () => {
+      const document = Document.create({
+        id: documentId,
+        originalFileName: command.fileName,
+        contentType: command.contentType,
+        status: DocumentStatus.UPLOADED
+      });
+
+      await this.metadataRepository.saveInitial(document);
+
+      const uploadUrl = await this.objectStorage.generateUploadUrl({
+        bucket: command.bucket,
+        key,
+        contentType: command.contentType
+      });
+
+      return { documentId, key, uploadUrl };
     });
-
-    await this.metadataRepository.saveInitial(document);
-
-    const uploadUrl = await this.objectStorage.generateUploadUrl({
-      bucket: command.bucket,
-      key,
-      contentType: command.contentType
-    });
-
-    return { documentId, key, uploadUrl };
   }
 }

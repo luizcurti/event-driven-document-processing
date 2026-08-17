@@ -2,9 +2,9 @@ import { Handler } from "aws-lambda";
 import { ProcessOcrUseCase } from "../contexts/document-processing/application/use-cases/process-ocr-use-case";
 import { AwsOcrProvider } from "../contexts/document-processing/infrastructure/adapters/aws-ocr-provider";
 import { ProcessingRequest } from "../shared/contracts/events";
-import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
+import { SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
 import { getAwsClientConfig, requireEnv } from "../shared/infrastructure/aws/aws-client-config";
-import { isNewEvent } from "../contexts/document-ingestion/infrastructure/adapters/aws-dynamo-idempotency-service";
+import { runIdempotent } from "../contexts/document-ingestion/infrastructure/adapters/aws-dynamo-idempotency-service";
 
 type OcrRequest = ProcessingRequest & { taskToken?: string };
 
@@ -18,42 +18,28 @@ export const handler: Handler<OcrRequest> = async (event) => {
 
   const eventId = event.eventId ?? `ocr#${event.documentId}#${event.key}`;
 
-  if (!(await isNewEvent(metadataTable, eventId))) {
-    const dedupedResult = { textPreview: "", confidence: 0 };
-    if (event.taskToken) {
-      await sfnClient.send(
-        new SendTaskSuccessCommand({
-          taskToken: event.taskToken,
-          output: JSON.stringify(dedupedResult)
-        })
-      );
+  return runIdempotent(metadataTable, eventId, async () => {
+    const useCase = new ProcessOcrUseCase(new AwsOcrProvider());
+    const result = await useCase.execute(event);
+
+    if (result === null) {
+      // Real async Textract job started; the ocr-callback Lambda resolves the task
+      // token via SNS once the job completes. Nothing more to do in this invocation.
+      return { accepted: true, resolved: false };
     }
-    return dedupedResult;
-  }
 
-  const useCase = new ProcessOcrUseCase(new AwsOcrProvider());
-  const result = await useCase.execute(event);
-
-  if (event.taskToken) {
-    try {
+    if (event.taskToken) {
       await sfnClient.send(
         new SendTaskSuccessCommand({
           taskToken: event.taskToken,
           output: JSON.stringify(result)
         })
       );
-      return { accepted: true };
-    } catch (error) {
-      await sfnClient.send(
-        new SendTaskFailureCommand({
-          taskToken: event.taskToken,
-          error: "OcrCallbackFailure",
-          cause: error instanceof Error ? error.message : "unknown"
-        })
-      );
-      throw error;
+      return { accepted: true, resolved: true };
     }
-  }
 
-  return result;
+    // Direct invocation outside the Step Functions pipeline (e.g. local manual
+    // testing): return the result as-is, there is no task token to resolve.
+    return result;
+  });
 };
