@@ -42,8 +42,10 @@ Diagram: `docs/diagram.png`
 ## Idempotency
 
 Every event-consuming Lambda (Upload, OCR, Thumbnail, Validation, Notification) runs its
-work through an atomic claim-and-cache helper (`withIdempotency`), backed by a single
-conditional DynamoDB write — never a read-then-decide race:
+work through an atomic claim-and-cache helper (`withIdempotency`, in
+`aws-dynamo-idempotency-service.ts` — OCR/Thumbnail/Validation/Notification call it via the
+`runIdempotent` convenience wrapper, Upload via the `IdempotencyService` port), backed by a
+single conditional DynamoDB write — never a read-then-decide race:
 
 1. Atomically claim the idempotency key (`PutItem` with `ConditionExpression:
    attribute_not_exists(pk)`, status `IN_PROGRESS`).
