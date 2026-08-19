@@ -5,13 +5,17 @@ import { MergedProcessingResult } from "../shared/contracts/events";
 import { requireEnv } from "../shared/infrastructure/aws/aws-client-config";
 import { withMetrics } from "../shared/infrastructure/metrics/metrics";
 
-type MetadataEvent =
-  | MergedProcessingResult
-  | {
-      documentId: string;
-      status: "FAILED";
-      errorMessage?: string;
-    };
+interface FailedProcessingEvent {
+  documentId: string;
+  status: "FAILED";
+  errorMessage?: string;
+}
+
+type MetadataEvent = MergedProcessingResult | FailedProcessingEvent;
+
+function isFailedEvent(event: MetadataEvent): event is FailedProcessingEvent {
+  return "status" in event && event.status === "FAILED";
+}
 
 const metadataHandler = async (event: MetadataEvent) => {
   const errorMessage = "Lambda missing DOCUMENTS_METADATA_TABLE or NOTIFICATION_QUEUE_URL";
@@ -20,11 +24,10 @@ const metadataHandler = async (event: MetadataEvent) => {
 
   const repository = new AwsDynamoProcessedMetadataRepository(metadataTable);
 
-  if ((event as { status?: string }).status === "FAILED") {
+  if (isFailedEvent(event)) {
     await repository.saveFailure({
       documentId: event.documentId,
-      errorMessage:
-        (event as { errorMessage?: string }).errorMessage ?? "Workflow execution failed",
+      errorMessage: event.errorMessage ?? "Workflow execution failed",
       failedAt: new Date().toISOString()
     });
     return { ok: true, status: "FAILED_RECORDED" };
@@ -32,7 +35,7 @@ const metadataHandler = async (event: MetadataEvent) => {
 
   const useCase = new PersistMetadataUseCase(repository, new AwsSqsQueuePublisher(queueUrl));
 
-  await useCase.execute(event as MergedProcessingResult);
+  await useCase.execute(event);
   return { ok: true };
 };
 

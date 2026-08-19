@@ -80,19 +80,26 @@ export class AwsDynamoMetadataRepository implements MetadataRepository {
       return null;
     }
 
-    const status =
-      (processingResult.Item?.status as string | undefined) ??
-      (metadataResult.Item?.status as string | undefined) ??
-      "UNKNOWN";
+    return this.mergeStatusRecord(documentId, metadataResult.Item, processingResult.Item);
+  }
 
+  /**
+   * The processing-result record reflects the latest known state once the pipeline
+   * has produced one, so it takes priority over the initial upload metadata record.
+   */
+  private mergeStatusRecord(
+    documentId: string,
+    metadataItem: Record<string, unknown> | undefined,
+    processingItem: Record<string, unknown> | undefined
+  ): DocumentStatusRecord {
     return {
       documentId,
-      status,
-      createdAt: metadataResult.Item?.createdAt as string | undefined,
+      status: (processingItem?.status as string) ?? (metadataItem?.status as string) ?? "UNKNOWN",
+      createdAt: metadataItem?.createdAt as string | undefined,
       updatedAt:
-        (processingResult.Item?.updatedAt as string | undefined) ??
-        (metadataResult.Item?.updatedAt as string | undefined),
-      errorMessage: processingResult.Item?.errorMessage as string | undefined
+        (processingItem?.updatedAt as string | undefined) ??
+        (metadataItem?.updatedAt as string | undefined),
+      errorMessage: processingItem?.errorMessage as string | undefined
     };
   }
 }

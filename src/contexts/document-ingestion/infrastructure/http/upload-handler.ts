@@ -4,24 +4,16 @@ import { AwsDynamoIdempotencyService } from "../adapters/aws-dynamo-idempotency-
 import { AwsDynamoMetadataRepository } from "../adapters/aws-dynamo-metadata-repository";
 import { AwsS3ObjectStorage } from "../adapters/aws-s3-object-storage";
 import { ConsoleLogger } from "../../../../shared/infrastructure/logging/logger";
-import { requireEnv } from "../../../../shared/infrastructure/aws/aws-client-config";
+import { ConfigurationError, requireEnv } from "../../../../shared/infrastructure/aws/aws-client-config";
 
 const logger = new ConsoleLogger();
 
 function resolveStatusCode(error: unknown): number {
-  if (!(error instanceof Error)) {
+  if (error instanceof ConfigurationError) {
     return 500;
   }
 
-  if (
-    error.message.includes("not configured") ||
-    error.message.includes("missing ") ||
-    error.message.includes("Failed to process upload")
-  ) {
-    return 500;
-  }
-
-  return 400;
+  return error instanceof Error ? 400 : 500;
 }
 
 export async function uploadHandler(

@@ -95,6 +95,53 @@ async function invokeLambda(lambdaClient, functionName, payload, step) {
   }
 }
 
+async function invokeExpectFunctionError(lambdaClient, functionName, payload, step) {
+  try {
+    const result = await lambdaClient.send(
+      new InvokeCommand({
+        FunctionName: functionName,
+        Payload: toJsonPayload(payload)
+      })
+    );
+
+    const raw = Buffer.from(result.Payload || []).toString("utf8");
+
+    if (!result.FunctionError) {
+      throw new Error(`Expected a FunctionError but the Lambda succeeded: ${raw}`);
+    }
+
+    pass(step, `FunctionError=${result.FunctionError} as expected`);
+    return raw;
+  } catch (error) {
+    fail(step, error);
+  }
+}
+
+function assertIncludes(step, haystack, needle) {
+  if (!haystack.includes(needle)) {
+    fail(step, new Error(`Expected "${needle}" in: ${haystack}`));
+    return;
+  }
+  pass(step, `contains "${needle}"`);
+}
+
+function httpEvent({ method, path, body, headers = {}, pathParameters }) {
+  return {
+    version: "2.0",
+    routeKey: `${method} ${path}`,
+    rawPath: path,
+    rawQueryString: "",
+    headers,
+    pathParameters,
+    requestContext: {
+      requestId: `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      http: { method, path }
+    },
+    isBase64Encoded: false,
+    body: body !== undefined ? JSON.stringify(body) : undefined
+  };
+}
+
 async function uploadUsingPresignedUrl(uploadUrl, contentType, fileBytes) {
   const response = await fetch(uploadUrl, {
     method: "PUT",
@@ -353,6 +400,271 @@ async function main() {
   }
 
   pass("Validate Notification Lambda response", "ok=true");
+
+  logSection("Step 6: Get Document Status (success)");
+
+  const statusEvent = httpEvent({
+    method: "GET",
+    path: `/documents/${documentId}`,
+    pathParameters: { documentId }
+  });
+
+  const statusResponse = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-get_document`,
+    statusEvent,
+    "Invoke Get-Document-Status Lambda for the processed document"
+  );
+
+  if (statusResponse.statusCode !== 200) {
+    fail(
+      "Validate Get-Document-Status success response",
+      new Error(`Unexpected status: ${statusResponse.statusCode}`)
+    );
+  } else {
+    const statusBody = JSON.parse(statusResponse.body);
+    if (statusBody.status !== "PROCESSED") {
+      fail(
+        "Validate Get-Document-Status success response",
+        new Error(`Expected status=PROCESSED, got ${statusBody.status}`)
+      );
+    } else {
+      pass("Validate Get-Document-Status success response", "status=PROCESSED");
+    }
+  }
+
+  logSection("Step 7: Upload idempotency (duplicate request)");
+
+  const idempotencyKey = `req-idempotency-${Date.now()}`;
+  const duplicateUploadEvent = httpEvent({
+    method: "POST",
+    path: "/documents",
+    headers: { "content-type": "application/json", "x-idempotency-key": idempotencyKey },
+    body: { fileName: "duplicate.pdf", contentType: "application/pdf" }
+  });
+
+  const firstCall = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-upload`,
+    duplicateUploadEvent,
+    "First upload call (idempotency key A)"
+  );
+  const secondCall = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-upload`,
+    duplicateUploadEvent,
+    "Duplicate upload call (same idempotency key)"
+  );
+
+  const firstBody = JSON.parse(firstCall.body);
+  const secondBody = JSON.parse(secondCall.body);
+
+  if (firstBody.documentId === secondBody.documentId && firstBody.uploadUrl === secondBody.uploadUrl) {
+    pass(
+      "Validate idempotent dedup",
+      "duplicate request returned the identical cached response (work was not redone)"
+    );
+  } else {
+    fail(
+      "Validate idempotent dedup",
+      new Error("Duplicate request produced a different response; idempotency did not short-circuit")
+    );
+  }
+
+  logSection("Failure scenario: Upload payload validation");
+
+  const invalidJsonResponse = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-upload`,
+    { ...httpEvent({ method: "POST", path: "/documents" }), body: "{not-json" },
+    "Invoke Upload Lambda with malformed JSON body"
+  );
+  if (invalidJsonResponse.statusCode === 400) {
+    pass("Validate malformed-JSON rejection", "statusCode=400");
+  } else {
+    fail(
+      "Validate malformed-JSON rejection",
+      new Error(`Expected 400, got ${invalidJsonResponse.statusCode}`)
+    );
+  }
+
+  const missingFileNameResponse = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-upload`,
+    httpEvent({ method: "POST", path: "/documents", body: { contentType: "application/pdf" } }),
+    "Invoke Upload Lambda with missing fileName"
+  );
+  if (missingFileNameResponse.statusCode === 400) {
+    pass("Validate missing-fileName rejection", "statusCode=400");
+  } else {
+    fail(
+      "Validate missing-fileName rejection",
+      new Error(`Expected 400, got ${missingFileNameResponse.statusCode}`)
+    );
+  }
+
+  logSection("Failure scenario: Get Document Status");
+
+  const unknownStatusResponse = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-get_document`,
+    httpEvent({
+      method: "GET",
+      path: "/documents/doc-does-not-exist",
+      pathParameters: { documentId: "doc-does-not-exist" }
+    }),
+    "Invoke Get-Document-Status Lambda for an unknown documentId"
+  );
+  if (unknownStatusResponse.statusCode === 404) {
+    pass("Validate unknown-document rejection", "statusCode=404");
+  } else {
+    fail(
+      "Validate unknown-document rejection",
+      new Error(`Expected 404, got ${unknownStatusResponse.statusCode}`)
+    );
+  }
+
+  const missingIdResponse = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-get_document`,
+    httpEvent({ method: "GET", path: "/documents/", pathParameters: {} }),
+    "Invoke Get-Document-Status Lambda with no documentId path parameter"
+  );
+  if (missingIdResponse.statusCode === 400) {
+    pass("Validate missing-documentId rejection", "statusCode=400");
+  } else {
+    fail(
+      "Validate missing-documentId rejection",
+      new Error(`Expected 400, got ${missingIdResponse.statusCode}`)
+    );
+  }
+
+  logSection("Failure scenario: business validation (Validation Lambda)");
+
+  const emptyFileUpload = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-upload`,
+    httpEvent({
+      method: "POST",
+      path: "/documents",
+      headers: { "x-idempotency-key": `req-empty-${Date.now()}` },
+      body: { fileName: "empty.pdf", contentType: "application/pdf" }
+    }),
+    "Invoke Upload Lambda for the empty-file scenario"
+  );
+  const emptyFileBody = JSON.parse(emptyFileUpload.body);
+  await uploadUsingPresignedUrl(emptyFileBody.uploadUrl, "application/pdf", Buffer.alloc(0));
+  pass("Upload a 0-byte file to S3", emptyFileBody.key);
+
+  const emptyFileValidation = await invokeExpectFunctionError(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-validation`,
+    { documentId: emptyFileBody.documentId, bucket: documentsBucket, key: emptyFileBody.key },
+    "Invoke Validation Lambda against the empty file (expect rejection)"
+  );
+  assertIncludes("Validate empty-file rejection reason", emptyFileValidation, "Empty file");
+
+  const wrongTypeUpload = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-upload`,
+    httpEvent({
+      method: "POST",
+      path: "/documents",
+      headers: { "x-idempotency-key": `req-wrongtype-${Date.now()}` },
+      body: { fileName: "notes.txt", contentType: "text/plain" }
+    }),
+    "Invoke Upload Lambda for the wrong-content-type scenario"
+  );
+  const wrongTypeBody = JSON.parse(wrongTypeUpload.body);
+  await uploadUsingPresignedUrl(wrongTypeBody.uploadUrl, "text/plain", Buffer.from("not a pdf"));
+  pass("Upload a non-PDF file to S3", wrongTypeBody.key);
+
+  const wrongTypeValidation = await invokeExpectFunctionError(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-validation`,
+    { documentId: wrongTypeBody.documentId, bucket: documentsBucket, key: wrongTypeBody.key },
+    "Invoke Validation Lambda against the non-PDF file (expect rejection)"
+  );
+  assertIncludes("Validate wrong-content-type rejection reason", wrongTypeValidation, "Invalid Content-Type");
+
+  logSection("Failure scenario: infrastructure error (missing S3 object)");
+
+  const missingObjectResult = await invokeExpectFunctionError(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-thumbnail`,
+    {
+      documentId: "doc-missing-object",
+      bucket: documentsBucket,
+      key: "doc-missing-object/does-not-exist.pdf"
+    },
+    "Invoke Thumbnail Lambda against a non-existent S3 object (expect infra error)"
+  );
+  if (/NotFound|404|does not exist/i.test(missingObjectResult)) {
+    pass("Validate missing-object error surfaces S3 NotFound", "NotFound-style error observed");
+  } else {
+    fail(
+      "Validate missing-object error surfaces S3 NotFound",
+      new Error(`Unexpected error shape: ${missingObjectResult}`)
+    );
+  }
+
+  logSection("Failure scenario: workflow failure handling (Metadata Lambda)");
+
+  const failedDocumentId = `doc-failed-${Date.now()}`;
+  const metadataFailedResult = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-metadata`,
+    {
+      documentId: failedDocumentId,
+      status: "FAILED",
+      errorMessage: "OCR failed: synthetic test failure"
+    },
+    "Invoke Metadata Lambda with a FAILED workflow event"
+  );
+  if (metadataFailedResult?.ok === true && metadataFailedResult?.status === "FAILED_RECORDED") {
+    pass("Validate FAILED workflow event was recorded", "ok=true, status=FAILED_RECORDED");
+  } else {
+    fail(
+      "Validate FAILED workflow event was recorded",
+      new Error(`Unexpected response: ${JSON.stringify(metadataFailedResult)}`)
+    );
+  }
+
+  await sleep(1000);
+
+  const failedStatusResponse = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-get_document`,
+    httpEvent({
+      method: "GET",
+      path: `/documents/${failedDocumentId}`,
+      pathParameters: { documentId: failedDocumentId }
+    }),
+    "Invoke Get-Document-Status Lambda for the FAILED document"
+  );
+  const failedStatusBody = JSON.parse(failedStatusResponse.body);
+  if (failedStatusBody.status === "FAILED" && failedStatusBody.errorMessage) {
+    pass("Verify FAILED status persisted in DynamoDB", `errorMessage="${failedStatusBody.errorMessage}"`);
+  } else {
+    fail(
+      "Verify FAILED status persisted in DynamoDB",
+      new Error(`Unexpected status record: ${JSON.stringify(failedStatusBody)}`)
+    );
+  }
+
+  logSection("Failure scenario: missing configuration (Start-Workflow Lambda)");
+
+  const startWorkflowResult = await invokeExpectFunctionError(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-start_workflow`,
+    { bucket: documentsBucket, key: `${documentId}/contract.pdf`, documentId },
+    "Invoke Start-Workflow Lambda (Step Functions disabled locally: expect ConfigurationError)"
+  );
+  assertIncludes(
+    "Validate Start-Workflow ConfigurationError",
+    startWorkflowResult,
+    "STEP_FUNCTIONS_ARN"
+  );
 
   summaryAndExit();
 }

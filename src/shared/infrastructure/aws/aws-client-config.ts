@@ -23,13 +23,25 @@ function resolveEndpoint(serviceName: string): string | undefined {
 }
 
 /**
+ * Thrown by requireEnv when required deployment configuration (env vars) is missing.
+ * Callers can distinguish this from validation/business errors via `instanceof`
+ * instead of matching on error message text.
+ */
+export class ConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigurationError";
+  }
+}
+
+/**
  * Reads a required environment/config value or throws with the given message.
  * Consolidates the repeated `if (!value) throw new Error(...)` guard used by
  * every Lambda handler.
  */
 export function requireEnv(value: string | undefined, message: string): string {
   if (!value) {
-    throw new Error(message);
+    throw new ConfigurationError(message);
   }
   return value;
 }
