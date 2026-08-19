@@ -23,13 +23,14 @@ resource "aws_lambda_function" "this" {
   environment {
     variables = merge(
       {
-        DOCUMENTS_BUCKET         = aws_s3_bucket.documents.bucket
-        DOCUMENTS_METADATA_TABLE = aws_dynamodb_table.documents_metadata.name
-        NOTIFICATION_QUEUE_URL   = aws_sqs_queue.notifications.url
-        NOTIFICATION_TOPIC_ARN   = aws_sns_topic.notifications.arn
-        ENVIRONMENT              = var.environment
-        AWS_EXECUTION_MODE       = var.deployment_mode
-        AWS_ENDPOINT_URL         = var.deployment_mode == "local" ? "http://localhost.localstack.cloud:4566" : ""
+        DOCUMENTS_BUCKET           = aws_s3_bucket.documents.bucket
+        DOCUMENTS_METADATA_TABLE   = aws_dynamodb_table.documents_metadata.name
+        NOTIFICATION_QUEUE_URL     = aws_sqs_queue.notifications.url
+        NOTIFICATION_TOPIC_ARN     = aws_sns_topic.notifications.arn
+        ENVIRONMENT                = var.environment
+        AWS_EXECUTION_MODE         = var.deployment_mode
+        AWS_ENDPOINT_URL           = var.deployment_mode == "local" ? "http://localhost.localstack.cloud:4566" : ""
+        PROMETHEUS_PUSHGATEWAY_URL = var.deployment_mode == "local" ? "http://pushgateway:9091" : ""
       },
       each.key == "ocr" ? {
         TEXTRACT_ROLE_ARN  = aws_iam_role.textract_service.arn

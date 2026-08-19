@@ -1,16 +1,16 @@
-import { Handler } from "aws-lambda";
 import { ProcessOcrUseCase } from "../contexts/document-processing/application/use-cases/process-ocr-use-case";
 import { AwsOcrProvider } from "../contexts/document-processing/infrastructure/adapters/aws-ocr-provider";
 import { ProcessingRequest } from "../shared/contracts/events";
 import { SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
 import { getAwsClientConfig, requireEnv } from "../shared/infrastructure/aws/aws-client-config";
 import { runIdempotent } from "../contexts/document-ingestion/infrastructure/adapters/aws-dynamo-idempotency-service";
+import { withMetrics } from "../shared/infrastructure/metrics/metrics";
 
 type OcrRequest = ProcessingRequest & { taskToken?: string };
 
 const sfnClient = new SFNClient(getAwsClientConfig("sfn"));
 
-export const handler: Handler<OcrRequest> = async (event) => {
+const ocrHandler = async (event: OcrRequest) => {
   const metadataTable = requireEnv(
     process.env.DOCUMENTS_METADATA_TABLE,
     "Lambda missing DOCUMENTS_METADATA_TABLE"
@@ -43,3 +43,5 @@ export const handler: Handler<OcrRequest> = async (event) => {
     return result;
   });
 };
+
+export const handler = withMetrics("ocr", ocrHandler);

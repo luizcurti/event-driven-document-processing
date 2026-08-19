@@ -1,10 +1,11 @@
-import { Handler, SQSEvent } from "aws-lambda";
+import { SQSEvent } from "aws-lambda";
 import { SendNotificationUseCase } from "../contexts/notification/application/use-cases/send-notification-use-case";
 import { AwsSnsNotificationSender } from "../contexts/notification/infrastructure/adapters/aws-sns-notification-sender";
 import { requireEnv } from "../shared/infrastructure/aws/aws-client-config";
 import { runIdempotent } from "../contexts/document-ingestion/infrastructure/adapters/aws-dynamo-idempotency-service";
+import { withMetrics } from "../shared/infrastructure/metrics/metrics";
 
-export const handler: Handler<SQSEvent> = async (event) => {
+const notificationHandler = async (event: SQSEvent) => {
   const errorMessage = "Lambda missing NOTIFICATION_TOPIC_ARN or DOCUMENTS_METADATA_TABLE";
   const notificationTopicArn = requireEnv(process.env.NOTIFICATION_TOPIC_ARN, errorMessage);
   const metadataTable = requireEnv(process.env.DOCUMENTS_METADATA_TABLE, errorMessage);
@@ -26,4 +27,6 @@ export const handler: Handler<SQSEvent> = async (event) => {
 
   return { ok: true };
 };
+
+export const handler = withMetrics("notification", notificationHandler);
 

@@ -1,7 +1,7 @@
-import { Handler } from "aws-lambda";
 import { StartExecutionCommand, SFNClient } from "@aws-sdk/client-sfn";
 import { AwsDynamoMetadataRepository } from "../contexts/document-ingestion/infrastructure/adapters/aws-dynamo-metadata-repository";
 import { getAwsClientConfig, requireEnv } from "../shared/infrastructure/aws/aws-client-config";
+import { withMetrics } from "../shared/infrastructure/metrics/metrics";
 
 type UploadEvent = {
   bucket: string;
@@ -24,7 +24,7 @@ function resolveDocumentId(event: UploadEvent): string {
   return event.key.split("/")[0] ?? "unknown-document";
 }
 
-export const handler: Handler<UploadEvent> = async (event) => {
+const startWorkflowHandler = async (event: UploadEvent) => {
   const stateMachineArn = requireEnv(
     event.stateMachineArn ?? process.env.STEP_FUNCTIONS_ARN,
     "Lambda missing STEP_FUNCTIONS_ARN"
@@ -59,3 +59,5 @@ export const handler: Handler<UploadEvent> = async (event) => {
 
   return { ok: true, documentId };
 };
+
+export const handler = withMetrics("start-workflow", startWorkflowHandler);

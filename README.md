@@ -34,6 +34,7 @@ Diagram: `docs/diagram.png`
 - SQS + DLQ
 - SNS
 - CloudWatch
+- Prometheus + Pushgateway + Grafana (local observability)
 - KMS
 - WAF (enabled in cloud; optional locally)
 - Terraform
@@ -111,6 +112,39 @@ To tear down local resources:
 ```bash
 npm run local:teardown
 ```
+
+## Observability (local)
+
+`docker-compose.local.yml` also runs a full local observability stack alongside LocalStack: Prometheus, a Pushgateway, Loki, Promtail, and Grafana. It starts and stops together with `npm run localstack:up` / `npm run localstack:down`.
+
+### Metrics
+
+Because every Lambda is a short-lived process (no server for Prometheus to scrape), each handler is wrapped by `withMetrics` (`src/shared/infrastructure/metrics/metrics.ts`, using `prom-client`), which on every invocation:
+
+- records `lambda_invocations_total{function_name,status}` and `lambda_invocation_duration_seconds{function_name,status}`;
+- pushes them to the Pushgateway via `PROMETHEUS_PUSHGATEWAY_URL` (set to `http://pushgateway:9091` only for `deployment_mode = "local"` in Terraform — a no-op in `dev`/`prod`, which keep CloudWatch as the source of truth);
+- logs a structured `lambda.invocation` line (function, status, duration) through the existing `ConsoleLogger`.
+
+Prometheus then scrapes the Pushgateway.
+
+### Logs
+
+Each Lambda's `console.log`/`console.error` output (JSON, via `ConsoleLogger`) lands on the stdout of the per-function execution container LocalStack spins up for that Lambda (`document-processing-localstack-lambda-<function>-<hash>`). Promtail discovers every container on the host whose name contains `document-processing` (via the Docker API, `infra/observability/promtail/promtail-config.yml`), tags each log line with `function_name` (parsed from the container name) and `level` (parsed from the JSON body), and ships them to Loki.
+
+### Dashboards
+
+Grafana is pre-provisioned from `infra/observability/` with both datasources and two dashboards:
+
+- **Document Processing - Lambdas Overview**: invocation rate, error rate, and p95 duration by function (Prometheus).
+- **Document Processing - Lambda Logs**: error-line rate by function plus a live log stream, filterable by function via a template variable (Loki).
+
+### Ports and access
+
+Chosen to avoid clashing with other local stacks on this machine: Grafana `http://localhost:3002` (login required, `admin`/`admin` — no anonymous access), Prometheus `http://localhost:9092`, Pushgateway `http://localhost:9091`, Loki `http://localhost:3101`.
+
+### Packaging note
+
+`npm run package:local` type-checks and then bundles each `src/functions/*.ts` entry point with esbuild (`scripts/bundle-lambdas.mjs`) instead of just compiling with `tsc` and zipping `dist/` as-is. `@aws-sdk/*` stays external (the Lambda Node.js runtime ships it), but every other npm dependency — `prom-client` included — must be bundled into the artifact, since the deployment zip never contains `node_modules`.
 
 ### 3.1 Verify local resources quickly (recruiter-friendly)
 

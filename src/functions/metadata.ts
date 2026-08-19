@@ -1,9 +1,9 @@
-import { Handler } from "aws-lambda";
 import { PersistMetadataUseCase } from "../contexts/document-processing/application/use-cases/persist-metadata-use-case";
 import { AwsDynamoProcessedMetadataRepository } from "../contexts/document-processing/infrastructure/adapters/aws-dynamo-processed-metadata-repository";
 import { AwsSqsQueuePublisher } from "../contexts/document-processing/infrastructure/adapters/aws-sqs-queue-publisher";
 import { MergedProcessingResult } from "../shared/contracts/events";
 import { requireEnv } from "../shared/infrastructure/aws/aws-client-config";
+import { withMetrics } from "../shared/infrastructure/metrics/metrics";
 
 type MetadataEvent =
   | MergedProcessingResult
@@ -13,7 +13,7 @@ type MetadataEvent =
       errorMessage?: string;
     };
 
-export const handler: Handler<MetadataEvent> = async (event) => {
+const metadataHandler = async (event: MetadataEvent) => {
   const errorMessage = "Lambda missing DOCUMENTS_METADATA_TABLE or NOTIFICATION_QUEUE_URL";
   const metadataTable = requireEnv(process.env.DOCUMENTS_METADATA_TABLE, errorMessage);
   const queueUrl = requireEnv(process.env.NOTIFICATION_QUEUE_URL, errorMessage);
@@ -35,3 +35,5 @@ export const handler: Handler<MetadataEvent> = async (event) => {
   await useCase.execute(event as MergedProcessingResult);
   return { ok: true };
 };
+
+export const handler = withMetrics("metadata", metadataHandler);

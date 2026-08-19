@@ -14,7 +14,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration:local": "node tests/integration/local-e2e.mjs",
-    "package:local": "npm run clean && npm run build && (cd dist && zip -rq lambda.zip .)",
+    "package:local": "npm run clean && npm run check && node scripts/bundle-lambdas.mjs && (cd dist && zip -rq lambda.zip .)",
     "local:setup": "./scripts/local-up.sh",
     "local:teardown": "./scripts/local-down.sh",
     "local:check": "./scripts/local-check.sh",
@@ -30,13 +30,15 @@
     "@aws-sdk/client-sqs": "^3.883.0",
     "@aws-sdk/client-textract": "^3.883.0",
     "@aws-sdk/lib-dynamodb": "^3.883.0",
-    "@aws-sdk/s3-request-presigner": "^3.883.0"
+    "@aws-sdk/s3-request-presigner": "^3.883.0",
+    "prom-client": "^15.1.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
     "@types/aws-lambda": "^8.10.147",
     "@types/node": "^22.13.10",
     "@vitest/coverage-v8": "^2.1.8",
+    "esbuild": "^0.28.2",
     "eslint": "^9.39.5",
     "globals": "^17.7.0",
     "typescript": "^5.8.2",

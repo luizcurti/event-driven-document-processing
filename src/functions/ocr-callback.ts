@@ -1,9 +1,10 @@
-import { Handler, SNSEvent } from "aws-lambda";
+import { SNSEvent } from "aws-lambda";
 import { GetDocumentTextDetectionCommand, TextractClient } from "@aws-sdk/client-textract";
 import { SendTaskFailureCommand, SendTaskSuccessCommand, SFNClient } from "@aws-sdk/client-sfn";
 import { summarizeTextractBlocks } from "../contexts/document-processing/infrastructure/adapters/aws-ocr-provider";
 import { TextractTaskTokenStore } from "../contexts/document-processing/infrastructure/adapters/textract-task-token-store";
 import { getAwsClientConfig, requireEnv } from "../shared/infrastructure/aws/aws-client-config";
+import { withMetrics } from "../shared/infrastructure/metrics/metrics";
 
 interface TextractJobNotification {
   JobId: string;
@@ -14,7 +15,7 @@ interface TextractJobNotification {
 const textractClient = new TextractClient(getAwsClientConfig("textract"));
 const sfnClient = new SFNClient(getAwsClientConfig("sfn"));
 
-export const handler: Handler<SNSEvent> = async (event) => {
+const ocrCallbackHandler = async (event: SNSEvent) => {
   const metadataTable = requireEnv(
     process.env.DOCUMENTS_METADATA_TABLE,
     "Lambda missing DOCUMENTS_METADATA_TABLE"
@@ -70,3 +71,5 @@ export const handler: Handler<SNSEvent> = async (event) => {
 
   return { ok: true };
 };
+
+export const handler = withMetrics("ocr-callback", ocrCallbackHandler);
