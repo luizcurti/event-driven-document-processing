@@ -2,9 +2,42 @@
 
 import { execSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve as resolvePath } from "node:path";
+import dns from "node:dns";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
+import { S3Client, HeadObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { SQSClient, GetQueueAttributesCommand } from "@aws-sdk/client-sqs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The presigned upload URL LocalStack returns uses `localhost.localstack.cloud`
+ * (see README "Project Notes") -- Lambda containers need that public-DNS-to-127.0.0.1
+ * trick to reach the host's LocalStack instance, so Terraform hardcodes it as
+ * AWS_ENDPOINT_URL for every local Lambda. This script's own `fetch` PUT to that same
+ * presigned URL runs on the host, though, and network-restricted sandboxes/CI runners
+ * with no DNS resolver at all (not just no internet) can't resolve it even though
+ * LocalStack itself is reachable on 127.0.0.1:4566. Patching `dns.lookup` for just this
+ * hostname reproduces a hosts-file override without needing root on the host.
+ */
+const originalDnsLookup = dns.lookup;
+dns.lookup = function patchedLookup(hostname, ...rest) {
+  if (hostname === "localhost.localstack.cloud") {
+    const callback = rest[rest.length - 1];
+    const options = rest.length > 1 ? rest[0] : undefined;
+    if (options && typeof options === "object" && options.all) {
+      callback(null, [{ address: "127.0.0.1", family: 4 }]);
+    } else {
+      callback(null, "127.0.0.1", 4);
+    }
+    return undefined;
+  }
+  return originalDnsLookup.call(dns, hostname, ...rest);
+};
 
 const REGION = process.env.AWS_REGION || "us-east-1";
 const LOCALSTACK_ENDPOINT = process.env.AWS_ENDPOINT_URL || "http://127.0.0.1:4566";
@@ -203,6 +236,25 @@ async function main() {
       }
     })
   );
+
+  const s3 = new S3Client({
+    region: REGION,
+    endpoint: LOCALSTACK_ENDPOINT,
+    forcePathStyle: true,
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID || "test",
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || "test"
+    }
+  });
+
+  const sqs = new SQSClient({
+    region: REGION,
+    endpoint: LOCALSTACK_ENDPOINT,
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID || "test",
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || "test"
+    }
+  });
 
   logSection("Step 1: Upload route entry");
 
@@ -665,6 +717,242 @@ async function main() {
     startWorkflowResult,
     "STEP_FUNCTIONS_ARN"
   );
+
+  logSection("Real file scenario: send a real PDF end-to-end and verify returned artifacts");
+
+  const realPdfPath = resolvePath(__dirname, "../../postman/contract.pdf");
+  const realPdfBytes = readFileSync(realPdfPath);
+
+  const realFileUpload = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-upload`,
+    httpEvent({
+      method: "POST",
+      path: "/documents",
+      headers: { "x-idempotency-key": `req-realfile-${Date.now()}` },
+      body: { fileName: "contract.pdf", contentType: "application/pdf" }
+    }),
+    "Invoke Upload Lambda for the real-file scenario"
+  );
+  const realFileBody = JSON.parse(realFileUpload.body);
+
+  await uploadUsingPresignedUrl(realFileBody.uploadUrl, "application/pdf", realPdfBytes);
+  pass("Upload the real contract.pdf file to S3", `${realFileBody.key} (${realPdfBytes.length} bytes)`);
+
+  const realFileRequest = { documentId: realFileBody.documentId, bucket: documentsBucket, key: realFileBody.key };
+
+  const realOcr = await invokeLambda(lambdaClient, `${FUNCTION_PREFIX}-ocr`, realFileRequest, "Run OCR Lambda on the real file");
+  const realThumbnail = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-thumbnail`,
+    realFileRequest,
+    "Run Thumbnail Lambda on the real file"
+  );
+  const realValidation = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-validation`,
+    realFileRequest,
+    "Run Validation Lambda on the real file"
+  );
+
+  if (realValidation?.valid !== true) {
+    fail("Validate the real PDF passes validation", new Error(JSON.stringify(realValidation)));
+  } else {
+    pass("Validate the real PDF passes validation", "valid=true");
+  }
+
+  const realMerge = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-merge_results`,
+    { documentId: realFileBody.documentId, ocr: realOcr, thumbnail: realThumbnail, validation: realValidation },
+    "Run Merge Results Lambda on the real file"
+  );
+  await invokeLambda(lambdaClient, `${FUNCTION_PREFIX}-metadata`, realMerge, "Run Metadata Lambda on the real file");
+
+  await sleep(1000);
+
+  logSection("Real file scenario: verify returned thumbnail artifacts actually exist in S3");
+
+  for (const imageKey of [...(realThumbnail.pageKeys ?? []), realThumbnail.thumbnailKey]) {
+    try {
+      const head = await s3.send(new HeadObjectCommand({ Bucket: documentsBucket, Key: imageKey }));
+      if ((head.ContentLength ?? 0) <= 0 || head.ContentType !== "image/png") {
+        throw new Error(`Unexpected artifact shape: ContentLength=${head.ContentLength}, ContentType=${head.ContentType}`);
+      }
+      pass(`Verify thumbnail artifact exists in S3 (${imageKey})`, `${head.ContentLength} bytes, ${head.ContentType}`);
+    } catch (error) {
+      fail(`Verify thumbnail artifact exists in S3 (${imageKey})`, error);
+    }
+  }
+
+  try {
+    const preview = await s3.send(new GetObjectCommand({ Bucket: documentsBucket, Key: realThumbnail.thumbnailKey }));
+    const previewBytes = Buffer.from(await preview.Body.transformToByteArray());
+    const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    if (!previewBytes.subarray(0, 8).equals(pngSignature)) {
+      throw new Error("Downloaded preview thumbnail does not start with a valid PNG signature");
+    }
+    pass("Download and validate the preview thumbnail's PNG signature", `${previewBytes.length} bytes`);
+  } catch (error) {
+    fail("Download and validate the preview thumbnail's PNG signature", error);
+  }
+
+  const realStatusResponse = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-get_document`,
+    httpEvent({
+      method: "GET",
+      path: `/documents/${realFileBody.documentId}`,
+      pathParameters: { documentId: realFileBody.documentId }
+    }),
+    "Invoke Get-Document-Status Lambda for the real-file document (verify the returned payload)"
+  );
+  const realStatusBody = JSON.parse(realStatusResponse.body);
+  if (realStatusResponse.statusCode === 200 && realStatusBody.status === "PROCESSED") {
+    pass("Validate the final returned status payload for the real file", `status=PROCESSED`);
+  } else {
+    fail(
+      "Validate the final returned status payload for the real file",
+      new Error(`Unexpected response: ${JSON.stringify(realStatusBody)}`)
+    );
+  }
+
+  logSection("Concurrency scenario: two concurrent uploads sharing the same idempotency key");
+
+  const concurrentKey = `req-concurrent-${Date.now()}`;
+  const concurrentEvent = httpEvent({
+    method: "POST",
+    path: "/documents",
+    headers: { "x-idempotency-key": concurrentKey },
+    body: { fileName: "concurrent.pdf", contentType: "application/pdf" }
+  });
+
+  const [concurrentA, concurrentB] = await Promise.all([
+    invokeLambda(lambdaClient, `${FUNCTION_PREFIX}-upload`, concurrentEvent, "Concurrent upload call A"),
+    invokeLambda(lambdaClient, `${FUNCTION_PREFIX}-upload`, concurrentEvent, "Concurrent upload call B")
+  ]);
+
+  const concurrentBodyA = JSON.parse(concurrentA.body);
+  const concurrentBodyB = JSON.parse(concurrentB.body);
+
+  if (
+    concurrentA.statusCode === 200 &&
+    concurrentB.statusCode === 200 &&
+    concurrentBodyA.documentId === concurrentBodyB.documentId &&
+    concurrentBodyA.uploadUrl === concurrentBodyB.uploadUrl
+  ) {
+    pass(
+      "Validate race-safe idempotency under real concurrency",
+      "both concurrent calls converged on the identical cached response"
+    );
+  } else {
+    fail(
+      "Validate race-safe idempotency under real concurrency",
+      new Error(`Diverging responses: A=${concurrentA.body} B=${concurrentB.body}`)
+    );
+  }
+
+  logSection("Notification scenario: idempotent duplicate SQS delivery");
+
+  const sharedMessageId = `msg-dup-${Date.now()}`;
+  const duplicateNotificationEvent = {
+    Records: [
+      {
+        messageId: sharedMessageId,
+        receiptHandle: "rh",
+        body: JSON.stringify({
+          documentId: realFileBody.documentId,
+          type: "DOCUMENT_PROCESSED",
+          processedAt: new Date().toISOString()
+        }),
+        attributes: {},
+        messageAttributes: {},
+        md5OfBody: "",
+        eventSource: "aws:sqs",
+        eventSourceARN: "arn:aws:sqs:us-east-1:000000000000:fake",
+        awsRegion: REGION
+      }
+    ]
+  };
+
+  await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-notification`,
+    duplicateNotificationEvent,
+    "First delivery of SQS message (messageId X)"
+  );
+  const secondDeliveryResult = await invokeLambda(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-notification`,
+    duplicateNotificationEvent,
+    "Duplicate re-delivery of the exact same SQS message (same messageId X, at-least-once semantics)"
+  );
+
+  if (secondDeliveryResult?.ok === true) {
+    pass(
+      "Validate duplicate SQS delivery is short-circuited by idempotency",
+      "second delivery returned ok=true without re-publishing to SNS"
+    );
+  } else {
+    fail(
+      "Validate duplicate SQS delivery is short-circuited by idempotency",
+      new Error(`Unexpected response: ${JSON.stringify(secondDeliveryResult)}`)
+    );
+  }
+
+  logSection("Failure scenario: notification Lambda with a malformed SQS message body");
+
+  const malformedNotificationEvent = {
+    Records: [
+      {
+        messageId: `msg-malformed-${Date.now()}`,
+        receiptHandle: "rh",
+        body: "{not-json",
+        attributes: {},
+        messageAttributes: {},
+        md5OfBody: "",
+        eventSource: "aws:sqs",
+        eventSourceARN: "arn:aws:sqs:us-east-1:000000000000:fake",
+        awsRegion: REGION
+      }
+    ]
+  };
+
+  await invokeExpectFunctionError(
+    lambdaClient,
+    `${FUNCTION_PREFIX}-notification`,
+    malformedNotificationEvent,
+    "Invoke Notification Lambda with a malformed message body (expect rejection, eligible for DLQ redrive)"
+  );
+
+  logSection("Infrastructure scenario: verify the notification queue's DLQ and visibility timeout");
+
+  const notificationQueueUrl = tfOutput?.notification_queue_url?.value;
+  if (!notificationQueueUrl) {
+    fail("Read notification_queue_url output", new Error("notification_queue_url not found"));
+  } else {
+    try {
+      const attributes = await sqs.send(
+        new GetQueueAttributesCommand({
+          QueueUrl: notificationQueueUrl,
+          AttributeNames: ["RedrivePolicy", "VisibilityTimeout"]
+        })
+      );
+      const redrivePolicy = JSON.parse(attributes.Attributes?.RedrivePolicy ?? "{}");
+      const visibilityTimeout = Number(attributes.Attributes?.VisibilityTimeout ?? 0);
+
+      if (redrivePolicy.maxReceiveCount === 3 && visibilityTimeout === 120 && redrivePolicy.deadLetterTargetArn) {
+        pass(
+          "Verify notification queue DLQ + visibility timeout configuration",
+          `maxReceiveCount=3, visibilityTimeout=120s, dlq=${redrivePolicy.deadLetterTargetArn}`
+        );
+      } else {
+        throw new Error(`Unexpected queue attributes: ${JSON.stringify(attributes.Attributes)}`);
+      }
+    } catch (error) {
+      fail("Verify notification queue DLQ + visibility timeout configuration", error);
+    }
+  }
 
   summaryAndExit();
 }
