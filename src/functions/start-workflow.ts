@@ -1,0 +1,71 @@
+import { StartExecutionCommand, SFNClient } from "@aws-sdk/client-sfn";
+import { AwsDynamoMetadataRepository } from "../contexts/document-ingestion/infrastructure/adapters/aws-dynamo-metadata-repository";
+import { getAwsClientConfig, requireEnv } from "../shared/infrastructure/aws/aws-client-config";
+import { withMetrics } from "../shared/infrastructure/metrics/metrics";
+
+type UploadEvent = {
+  bucket: string;
+  key: string;
+  documentId?: string;
+  stateMachineArn?: string;
+};
+
+const sfnClient = new SFNClient(getAwsClientConfig("sfn"));
+
+function normalizeExecutionName(documentId: string): string {
+  return documentId.replace(/[^0-9A-Za-z-_]/g, "-").slice(0, 80);
+}
+
+function resolveDocumentId(event: UploadEvent): string {
+  if (event.documentId?.trim()) {
+    return event.documentId.trim();
+  }
+
+  return event.key.split("/")[0] ?? "unknown-document";
+}
+
+const startWorkflowHandler = async (event: UploadEvent) => {
+  const stateMachineArn = requireEnv(
+    event.stateMachineArn ?? process.env.STEP_FUNCTIONS_ARN,
+    "Lambda missing STEP_FUNCTIONS_ARN"
+  );
+
+  const documentId = resolveDocumentId(event);
+  let deduplicated = false;
+
+  try {
+    await sfnClient.send(
+      new StartExecutionCommand({
+        stateMachineArn,
+        name: normalizeExecutionName(documentId),
+        input: JSON.stringify({
+          bucket: event.bucket,
+          key: event.key,
+          documentId
+        })
+      })
+    );
+  } catch (error) {
+    if (error instanceof Error && error.name === "ExecutionAlreadyExists") {
+      deduplicated = true;
+    } else {
+      throw error;
+    }
+  }
+
+  // Always runs, dedup or not: this is what makes a Lambda-managed async retry (e.g.
+  // the original attempt started the execution but crashed before this call) still
+  // mark the document PROCESSING instead of leaving it stuck at its pre-workflow
+  // status forever.
+  const metadataTable = requireEnv(
+    process.env.DOCUMENTS_METADATA_TABLE,
+    "Lambda missing DOCUMENTS_METADATA_TABLE"
+  );
+  await new AwsDynamoMetadataRepository(metadataTable).markProcessing(documentId);
+
+  return { ok: true, documentId, ...(deduplicated ? { deduplicated: true } : {}) };
+};
+
+export const handler = withMetrics("start-workflow", startWorkflowHandler, {
+  getCorrelationId: (event) => event.documentId
+});

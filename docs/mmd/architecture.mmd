@@ -1,0 +1,58 @@
+flowchart TB
+    client["Client"]
+
+    subgraph edge["Edge (cloud mode only)"]
+        waf["AWS WAF"]
+        apigw["API Gateway (HTTP API)\nAWS_IAM authorization"]
+    end
+
+    upload["Upload Lambda"]
+    getdoc["Get-Document Lambda"]
+    s3["S3 Bucket\ndocuments (KMS-encrypted, versioned)"]
+    ddb[("DynamoDB\ndocuments-metadata")]
+    eventbridge["EventBridge\nObjectCreated rule"]
+    startworkflow["Start-Workflow Lambda"]
+    sfn["Step Functions\nname = documentId"]
+
+    ocr["OCR Lambda"]
+    textract["Textract\nStartDocumentTextDetection"]
+    textractsns["SNS\ntextract-completion"]
+    ocrcallback["OCR-Callback Lambda\n(SendTaskSuccess/Failure)"]
+    thumbnail["Thumbnail Lambda"]
+    validation["Validation Lambda"]
+    merge["Merge-Results Lambda"]
+    metadata["Metadata Lambda"]
+    sqs["SQS\nnotifications (+ DLQ, maxReceive=3)"]
+    notification["Notification Lambda"]
+    notifsns["SNS\nnotifications-topic"]
+    cw["CloudWatch\nLogs, Metrics, Alarms"]
+
+    client --> waf --> apigw --> upload
+    client --> getdoc
+    upload --> ddb
+    upload --> s3
+    s3 --> eventbridge --> startworkflow --> sfn
+    startworkflow --> ddb
+    getdoc --> ddb
+
+    sfn --> ocr
+    sfn --> thumbnail
+    sfn --> validation
+    ocr -->|waitForTaskToken| textract
+    textract --> textractsns --> ocrcallback --> sfn
+
+    ocr --> merge
+    thumbnail --> merge
+    validation --> merge
+    merge --> metadata
+    metadata --> ddb
+    metadata --> sqs --> notification --> notifsns
+
+    upload -.-> cw
+    ocr -.-> cw
+    thumbnail -.-> cw
+    validation -.-> cw
+    merge -.-> cw
+    metadata -.-> cw
+    notification -.-> cw
+    sfn -.->|execution FAILED| cw

@@ -1,0 +1,69 @@
+import { AwsCredentialIdentity } from "@aws-sdk/types";
+
+function normalizeServiceName(serviceName: string): string {
+  return serviceName.trim().toUpperCase().replace(/[^A-Z0-9]/g, "_");
+}
+
+export function isLocalAwsMode(): boolean {
+  return (
+    process.env.AWS_EXECUTION_MODE === "local" ||
+    process.env.LOCALSTACK_ENABLED === "true" ||
+    !!process.env.AWS_ENDPOINT_URL
+  );
+}
+
+function resolveEndpoint(serviceName: string): string | undefined {
+  const normalizedService = normalizeServiceName(serviceName);
+  const serviceEndpoint = process.env[`AWS_ENDPOINT_URL_${normalizedService}`];
+  if (serviceEndpoint) {
+    return serviceEndpoint;
+  }
+
+  return process.env.AWS_ENDPOINT_URL;
+}
+
+/**
+ * Thrown by requireEnv when required deployment configuration (env vars) is missing.
+ * Callers can distinguish this from validation/business errors via `instanceof`
+ * instead of matching on error message text.
+ */
+export class ConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigurationError";
+  }
+}
+
+/**
+ * Reads a required environment/config value or throws with the given message.
+ * Consolidates the repeated `if (!value) throw new Error(...)` guard used by
+ * every Lambda handler.
+ */
+export function requireEnv(value: string | undefined, message: string): string {
+  if (!value) {
+    throw new ConfigurationError(message);
+  }
+  return value;
+}
+
+export function getAwsClientConfig(serviceName: string): {
+  region?: string;
+  endpoint?: string;
+  credentials?: AwsCredentialIdentity;
+} {
+  const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-east-1";
+  const endpoint = resolveEndpoint(serviceName);
+
+  if (!isLocalAwsMode() || !endpoint) {
+    return { region };
+  }
+
+  return {
+    region,
+    endpoint,
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "test",
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "test"
+    }
+  };
+}

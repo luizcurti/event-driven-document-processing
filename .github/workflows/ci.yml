@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  quality:
+    name: Lint, typecheck, unit tests, build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Run typecheck
+        run: npm run check
+
+      - name: Run typecheck on tests
+        run: npm run check:tests
+
+      - name: Run unit tests with coverage
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
+  terraform:
+    name: Validate Terraform
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.0"
+
+      - name: Terraform fmt check
+        run: terraform -chdir=infra/terraform fmt -check -recursive
+
+      - name: Terraform init (no backend)
+        run: terraform -chdir=infra/terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform -chdir=infra/terraform validate
+
+      - name: Setup tflint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Run tflint
+        working-directory: infra/terraform
+        run: |
+          tflint --init
+          tflint --recursive
+
+      - name: Install checkov
+        run: pip install --quiet checkov
+
+      # Skips target findings that don't apply to this project's actual shape (a
+      # single-region, zip-deployed Lambda stack with no VPC-bound resources) or
+      # a control that's already in place under a separate resource checkov's
+      # graph check doesn't associate in this version:
+      #   CKV_AWS_117/272 - no VPC-bound resource (RDS/ElastiCache) to justify a VPC,
+      #     no code-signing pipeline for a demo project.
+      #   CKV_AWS_338     - retention is the explicit var.logs_retention_in_days
+      #     (30d default), an intentional cost choice, not an unmanaged default.
+      #   CKV_AWS_144/18  - single-region demo with no DR/audit requirement that
+      #     would justify cross-region replication or a second logging bucket.
+      #   CKV2_AWS_31     - false positive: aws_wafv2_web_acl_logging_configuration
+      #     is present (api.tf) but this checkov version's graph check doesn't
+      #     associate it with the web ACL.
+      #   CKV_AWS_109/111/356 - standard KMS key-policy pattern (resource "*" is
+      #     scoped by being the key's own policy), not an actual wildcard grant.
+      - name: Run checkov static analysis
+        run: |
+          checkov -d infra/terraform --compact --quiet \
+            --skip-check CKV_AWS_117,CKV_AWS_272,CKV_AWS_338,CKV_AWS_144,CKV_AWS_18,CKV2_AWS_31,CKV_AWS_109,CKV_AWS_111,CKV_AWS_356
+
+  local-stack-validation:
+    name: Docker/LocalStack integration, e2e, and API tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.0"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Brings up LocalStack via Docker Compose, packages the Lambdas, applies the local
+      # Terraform stack, and exercises the full upload -> OCR/Thumbnail/Validation ->
+      # Merge -> Metadata -> Notification pipeline plus its failure/idempotency paths
+      # against real (containerized) infrastructure.
+      - name: Run integration/e2e tests against LocalStack
+        run: npm run test:integration:local
+
+      # Runs the same Postman collection a developer would run locally, against the
+      # LocalStack stack the previous step just deployed.
+      - name: Run Postman/Newman API collection tests
+        run: npm run test:api:local
+
+      - name: Tear down LocalStack and local Terraform stack
+        if: always()
+        run: npm run local:teardown

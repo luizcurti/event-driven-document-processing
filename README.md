@@ -1,0 +1,509 @@
+# Document Processing Platform
+
+Serverless, event-driven PDF processing platform built with Node.js, TypeScript, Terraform, and AWS services.
+
+> **Demo/portfolio project, not a production deployment.** Everything here — unit/integration
+> tests, the Postman collection, CI — is validated end-to-end against **LocalStack** (Docker),
+> never against a real AWS account. The Terraform code for `deployment_mode = "cloud"` (API
+> Gateway, real Textract, WAF, etc.) is written to be realistic and passes `terraform
+> validate`, but it has never been `apply`'d to live AWS — see "Cloud Deployment" below before
+> considering it production-ready.
+
+## Architecture
+
+![Architecture overview](docs/arch/architecture.svg)
+
+High-level AWS architecture (write path, read path, and the observability/legend): [docs/arch/architecture.svg](docs/arch/architecture.svg).
+
+Main flow:
+
+1. `POST /documents` on API Gateway invokes the Upload Lambda.
+2. The Upload Lambda validates the input, generates a `documentId`, saves the initial metadata in DynamoDB, and returns an `uploadUrl` (S3 presigned URL). The whole operation runs once per `requestId`/idempotency key via an atomic claim-and-cache pattern (see "Idempotency" below).
+3. The client uploads the PDF to S3 using the `uploadUrl`.
+4. The S3 `Object Created` event reaches EventBridge, which starts Step Functions (execution name = `documentId`) and also marks the document `PROCESSING` in DynamoDB.
+5. Step Functions runs OCR, Thumbnail, and Validation in parallel.
+   - OCR is genuinely asynchronous in cloud mode: the OCR Lambda calls `Textract.StartDocumentTextDetection` and returns immediately; a `waitForTaskToken` state pauses that branch. Textract publishes job completion to an SNS topic, which invokes a dedicated `ocr-callback` Lambda that fetches the result and resolves the task token (`SendTaskSuccess`/`SendTaskFailure`). In local mode (no Textract in LocalStack Community), the OCR Lambda resolves synchronously with a mock result instead.
+   - Thumbnail writes real (placeholder, solid-color) PNG images to `thumbnails/{documentId}/page-1.png`, `page-2.png`, and `preview.png`. Pixel-accurate PDF rendering still requires the poppler/sharp/chromium container-image pipeline described in the spec — this placeholder produces genuine image artifacts at the right keys without that native-binary dependency.
+6. Merge Results consolidates the data.
+7. The Metadata Lambda persists the final result in DynamoDB and publishes an event to SQS.
+8. The Notification Lambda consumes SQS and publishes to SNS.
+
+Important: there is a single DynamoDB table for documents (`documents-metadata`), updated at several moments: initial creation (upload), `PROCESSING` (workflow start), and final result/failure (post-processing).
+
+## Diagrams
+
+Mermaid sources live in [docs/mmd](docs/mmd), rendered to PNG in [docs/img](docs/img):
+
+| Diagram | Description |
+| --- | --- |
+| [architecture.mmd](docs/mmd/architecture.mmd) / [architecture.png](docs/img/architecture.png) | Full system architecture: edge, Lambdas, Step Functions, and the AWS services each stage touches. |
+| [state-machine.mmd](docs/mmd/state-machine.mmd) / [state-machine.png](docs/img/state-machine.png) | The Step Functions pipeline, including the selective-retry/Catch behavior on each branch. |
+| [upload-sequence.mmd](docs/mmd/upload-sequence.mmd) / [upload-sequence.png](docs/img/upload-sequence.png) | Sequence diagram of the upload request, including the idempotency claim-and-cache flow. |
+| [document-status.mmd](docs/mmd/document-status.mmd) / [document-status.png](docs/img/document-status.png) | `DocumentStatus` lifecycle as actually persisted to DynamoDB. |
+| [deployment.mmd](docs/mmd/deployment.mmd) / [deployment.png](docs/img/deployment.png) | Local (Docker Compose/LocalStack) vs. cloud (AWS) deployment topology. |
+
+## Technologies
+
+- Node.js + TypeScript
+- AWS Lambda
+- API Gateway
+- S3
+- EventBridge
+- Step Functions
+- Textract (async OCR)
+- DynamoDB
+- SQS + DLQ
+- SNS
+- CloudWatch (Logs, Alarms, Budgets)
+- X-Ray (distributed tracing)
+- Prometheus + Pushgateway + Grafana (local observability)
+- KMS
+- WAF (enabled in cloud; optional locally)
+- Terraform
+
+## Idempotency
+
+Every event-consuming Lambda (Upload, OCR, Thumbnail, Validation, Notification) runs its
+work through an atomic claim-and-cache helper (`withIdempotency`, in
+`aws-dynamo-idempotency-service.ts` — OCR/Thumbnail/Validation/Notification call it via the
+`runIdempotent` convenience wrapper, Upload via the `IdempotencyService` port), backed by a
+single conditional DynamoDB write — never a read-then-decide race:
+
+1. Atomically claim the idempotency key (`PutItem` with `ConditionExpression:
+   attribute_not_exists(pk)`, status `IN_PROGRESS`).
+2. If the claim fails because the key already exists, **poll** the existing record for
+   up to ~0.75s (6 reads, 150ms apart) rather than deciding on a single read. If it
+   becomes `COMPLETED` during that window, return the cached result without re-running
+   the work — this is what makes two genuinely concurrent duplicate requests converge on
+   one shared result instead of each running the work with its own outcome (a single
+   immediate read-then-decide here would defeat the atomic claim above: it would let two
+   requests that are *both still actively in flight* each observe `IN_PROGRESS` and each
+   run the work, producing two different results, e.g. two different `documentId`s, for
+   the same idempotency key). If the record is still `IN_PROGRESS` once that window
+   elapses, the original attempt is assumed to have crashed, and this call falls through
+   and actually runs the work itself — this is what makes Step Functions/SQS retries
+   after a real transient failure retry the operation, instead of returning a fabricated
+   success.
+3. On success, atomically mark the record `COMPLETED` with the result attached.
+
+## IAM
+
+Each Lambda has its own execution role, scoped in Terraform (`locals.lambda_iam_statements`)
+to only the actions/resources that function needs — e.g. the OCR Lambda gets
+`s3:GetObject`, never `s3:*`; `merge_results` (a pure function) gets no resource access
+at all beyond CloudWatch Logs.
+
+## Observability (cloud)
+
+In `deployment_mode = "cloud"`, CloudWatch and X-Ray are the source of truth (Prometheus/Grafana
+are local-only — see "Observability (local)" below):
+
+- **Logs**: every Lambda writes structured JSON (`ConsoleLogger`) to its own
+  `/aws/lambda/<function>` log group, retained for `logs_retention_in_days` (30 by default)
+  and KMS-encrypted. The `lambda.invocation` line `withMetrics` emits on every invocation
+  carries a `correlationId` — the `documentId`, the upload's idempotency key, or a Textract
+  `JobId`, depending on what that event shape actually has — so a single document's path
+  through OCR → Thumbnail → Validation → Merge → Metadata → Notification can be grepped in
+  one CloudWatch Logs Insights query.
+- **Tracing**: every Lambda has `tracing_config { mode = "Active" }`, and the Step Functions
+  state machine has `tracing_configuration { enabled = true }`, each with the X-Ray IAM
+  permissions (`AWSXRayDaemonWriteAccess`) it needs to actually emit trace data. A document's
+  execution shows up as one connected X-Ray trace across Step Functions and every Lambda it
+  invokes.
+- **Alarms** (all notify the existing `notifications` SNS topic): per-Lambda `Errors`,
+  `Throttles`, and `Duration` (threshold = 80% of that function's own timeout); the upload
+  API's `4xx`/`5xx`; Step Functions `ExecutionsFailed` and `ExecutionsTimedOut`.
+- **API Gateway access logs**: JSON, in `/aws/apigateway/<api>-upload-api`.
+
+## Resilience & Cost Controls
+
+- **Reserved concurrency**: every Lambda has `reserved_concurrent_executions` set
+  (`locals.lambda_config`), so a bug in one function (e.g. a retry storm) can't starve every
+  other Lambda's share of the account's concurrency pool.
+- **API throttling**: the upload API's default stage sets `throttling_rate_limit` /
+  `throttling_burst_limit` (`var.api_throttling_rate_limit` / `var.api_throttling_burst_limit`).
+- **Lambda invocation DLQ**: `start_workflow` (invoked by EventBridge) and `ocr_callback`
+  (invoked by SNS) — the only two functions AWS invokes asynchronously — have a
+  `dead_letter_config` pointing at a dedicated SQS queue (`lambda-invocations-dlq`), separate
+  from the notification queue's own DLQ, which covers message-processing failures rather than
+  invocation failures.
+- **Versioning + aliases**: every Lambda publishes an immutable numbered version on each
+  `apply` (`publish = true`) and has a `live` alias pointing at it. No trigger in this stack
+  targets the alias yet — everything still invokes the unqualified `$LATEST` ARN, consistent
+  with the LocalStack-first testing strategy — but the primitive is in place for a deploy
+  pipeline to shift the alias between versions for gradual rollout/rollback instead of
+  overwriting `$LATEST` in place.
+- **Budget alarm**: set `budget_alert_email` (and optionally `monthly_budget_usd`, default
+  $10) on a `cloud` deployment to get an `aws_budgets_budget` alerting at 80% forecasted and
+  100% actual monthly spend. Skipped in `local` mode (LocalStack has no Budgets API) and
+  whenever the email is left empty.
+
+## Prerequisites
+
+- Node.js 22+
+- Docker + Docker Compose
+- Terraform 1.12+
+
+## Local Quick Start (LocalStack)
+
+You can bootstrap the full local environment in one command:
+
+```bash
+npm run local:setup
+```
+
+This script installs dependencies when needed, packages the Lambdas, starts LocalStack, runs `terraform init`, and applies the local Terraform stack.
+
+### 1. Install dependencies and package
+
+```bash
+npm install
+npm run package:local
+```
+
+This generates `dist/lambda.zip` with all handlers.
+
+### 2. Start LocalStack
+
+```bash
+npm run localstack:up
+```
+
+### 3. Apply Terraform in local mode
+
+```bash
+cd infra/terraform
+terraform init -input=false
+terraform apply -input=false -auto-approve -var-file=environments/local.tfvars
+```
+
+Equivalent one-shot shell script:
+
+```bash
+./scripts/local-up.sh
+```
+
+To tear down local resources:
+
+```bash
+npm run local:teardown
+```
+
+## Observability (local)
+
+`docker-compose.local.yml` also runs a full local observability stack alongside LocalStack: Prometheus, a Pushgateway, Loki, Promtail, and Grafana. It starts and stops together with `npm run localstack:up` / `npm run localstack:down`.
+
+### Metrics
+
+Because every Lambda is a short-lived process (no server for Prometheus to scrape), each handler is wrapped by `withMetrics` (`src/shared/infrastructure/metrics/metrics.ts`, using `prom-client`), which on every invocation:
+
+- records `lambda_invocations_total{function_name,status}` and `lambda_invocation_duration_seconds{function_name,status}`;
+- pushes them to the Pushgateway via `PROMETHEUS_PUSHGATEWAY_URL` (set to `http://pushgateway:9091` only for `deployment_mode = "local"` in Terraform — a no-op in `dev`/`prod`, which keep CloudWatch as the source of truth);
+- logs a structured `lambda.invocation` line (function, status, duration, and a `correlationId` when the event carries one) through the existing `ConsoleLogger`.
+
+Prometheus then scrapes the Pushgateway.
+
+### Logs
+
+Each Lambda's `console.log`/`console.error` output (JSON, via `ConsoleLogger`) lands on the stdout of the per-function execution container LocalStack spins up for that Lambda (`document-processing-localstack-lambda-<function>-<hash>`). Promtail discovers every container on the host whose name contains `document-processing` (via the Docker API, `infra/observability/promtail/promtail-config.yml`), tags each log line with `function_name` (parsed from the container name) and `level` (parsed from the JSON body), and ships them to Loki.
+
+### Dashboards
+
+Grafana is pre-provisioned from `infra/observability/` with both datasources and two dashboards:
+
+- **Document Processing - Lambdas Overview**: invocation rate, error rate, and p95 duration by function (Prometheus).
+- **Document Processing - Lambda Logs**: error-line rate by function plus a live log stream, filterable by function via a template variable (Loki).
+
+### Ports and access
+
+Chosen to avoid clashing with other local stacks on this machine: Grafana `http://localhost:3002` (login required, `admin`/`admin` — no anonymous access), Prometheus `http://localhost:9092`, Pushgateway `http://localhost:9091`, Loki `http://localhost:3101`.
+
+### Packaging note
+
+`npm run package:local` type-checks and then bundles each `src/functions/*.ts` entry point with esbuild (`scripts/bundle-lambdas.mjs`) instead of just compiling with `tsc` and zipping `dist/` as-is. `@aws-sdk/*` stays external (the Lambda Node.js runtime ships it), but every other npm dependency — `prom-client` included — must be bundled into the artifact, since the deployment zip never contains `node_modules`.
+
+### 3.1 Verify local resources quickly (recruiter-friendly)
+
+Run a single command to inspect the main LocalStack resources used by the project:
+
+```bash
+npm run local:check
+```
+
+This command checks:
+
+- LocalStack health endpoint
+- DynamoDB tables and item sample
+- SQS queues and message counters
+- S3 buckets and object sample
+- SNS topics
+- Lambda functions
+
+Optional filters:
+
+```bash
+RESOURCE_PREFIX=document-processing-platform-local npm run local:check
+AWS_REGION=us-east-1 AWS_ENDPOINT_URL=http://127.0.0.1:4566 npm run local:check
+```
+
+### 4. Start the upload flow locally
+
+In LocalStack Community, `apigatewayv2` and parts of the Step Functions API may not be available.
+For that reason, the following are disabled in `local.tfvars`:
+
+- `enable_api_gateway = false`
+- `enable_step_functions = false`
+
+The upload and local processing flow must be validated by invoking the Lambdas directly.
+
+Example event to invoke the upload Lambda:
+
+```bash
+cat > /tmp/upload-event.json <<'EOF'
+{
+  "version": "2.0",
+  "routeKey": "POST /documents",
+  "rawPath": "/documents",
+  "headers": {
+    "content-type": "application/json",
+    "x-idempotency-key": "req-local-001"
+  },
+  "requestContext": {
+    "requestId": "req-local-001"
+  },
+  "body": "{\"fileName\":\"contract.pdf\",\"contentType\":\"application/pdf\"}"
+}
+EOF
+
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke \
+  --function-name document-processing-platform-local-upload \
+  --payload fileb:///tmp/upload-event.json \
+  /tmp/upload-response.json && cat /tmp/upload-response.json
+```
+
+### 5. Upload to S3 using the uploadUrl
+
+Expected Lambda response body:
+
+```json
+{
+  "documentId": "...",
+  "uploadUrl": "...",
+  "key": "..."
+}
+```
+
+### 6. Send the file to S3 with the uploadUrl
+
+```bash
+curl -X PUT "$UPLOAD_URL" \
+  -H "Content-Type: application/pdf" \
+  --data-binary @./contract.pdf
+```
+
+In cloud, the rest of the flow is asynchronous after the upload (EventBridge -> Step Functions -> Lambdas -> DynamoDB/SQS/SNS).
+In LocalStack Community, use the manual fallback in step 7.
+
+In cloud, API routes use `AWS_IAM` authentication.
+
+Additional status endpoint:
+
+- `GET /documents/{documentId}`
+
+### 7. Run the manual pipeline locally (fallback without Step Functions)
+
+Use the `documentId`, `bucket`, and `key` from the upload response:
+
+```bash
+cat > /tmp/processing-request.json <<'EOF'
+{
+  "documentId": "YOUR_DOCUMENT_ID",
+  "bucket": "document-processing-platform-local-documents",
+  "key": "YOUR_DOCUMENT_ID/contract.pdf"
+}
+EOF
+
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-processing-platform-local-ocr --payload fileb:///tmp/processing-request.json /tmp/ocr.json && cat /tmp/ocr.json
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-processing-platform-local-thumbnail --payload fileb:///tmp/processing-request.json /tmp/thumbnail.json && cat /tmp/thumbnail.json
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-processing-platform-local-validation --payload fileb:///tmp/processing-request.json /tmp/validation.json && cat /tmp/validation.json
+```
+
+Build the merge payload and execute it:
+
+```bash
+cat > /tmp/merge-event.json <<'EOF'
+{
+  "documentId": "YOUR_DOCUMENT_ID",
+  "ocr": {"textPreview": "mock", "confidence": 0.99},
+  "thumbnail": {"thumbnailKey": "thumbnails/YOUR_DOCUMENT_ID.json", "width": 320, "height": 200},
+  "validation": {"valid": true, "reasons": []}
+}
+EOF
+
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-processing-platform-local-merge_results --payload fileb:///tmp/merge-event.json /tmp/merged.json && cat /tmp/merged.json
+aws --endpoint-url=http://127.0.0.1:4566 lambda invoke --function-name document-processing-platform-local-metadata --payload fileb:///tmp/merged.json /tmp/metadata.json && cat /tmp/metadata.json
+```
+
+The notification Lambda consumes messages automatically from SQS via event source mapping.
+
+## Postman
+
+The repository includes Postman assets under [postman](postman) for both cloud-oriented HTTP testing and the current local-only workflow.
+
+Available files:
+
+- [postman/document-processing-platform.postman_collection.json](postman/document-processing-platform.postman_collection.json): API Gateway oriented collection for a real AWS HTTP endpoint.
+- [postman/document-processing-platform-local.postman_collection.json](postman/document-processing-platform-local.postman_collection.json): LocalStack collection that invokes Lambdas directly through the Lambda API.
+- [postman/document-processing-platform-local.postman_environment.json](postman/document-processing-platform-local.postman_environment.json): Local environment with LocalStack endpoint, test credentials, Lambda names, and the bundled sample PDF path.
+- [postman/contract.pdf](postman/contract.pdf): Sample PDF file used by the upload step.
+
+### Local Postman flow
+
+Because `enable_api_gateway = false` in local mode, the local collection does not call `POST /documents` over HTTP. Instead, it invokes the deployed Lambdas in LocalStack directly.
+
+Recommended order:
+
+1. Import the local collection and local environment.
+2. Start LocalStack and apply Terraform locally with `npm run local:setup` or `./scripts/local-up.sh`.
+3. Run `1. Invoke Upload Lambda`.
+4. Run `2. Upload PDF To Presigned URL`.
+5. Run `3. Invoke OCR Lambda`.
+6. Run `4. Invoke Thumbnail Lambda`.
+7. Run `5. Invoke Validation Lambda`.
+8. Run `6. Invoke Merge Results Lambda`.
+9. Run `7. Invoke Metadata Lambda`.
+10. Run `8. Invoke Get Document Status Lambda`.
+
+The collection automatically stores `documentId`, `uploadUrl`, `uploadKey`, and intermediate processing results as collection variables.
+
+### Running the local collection automatically (Newman)
+
+```bash
+npm run test:api:local
+```
+
+This runs `scripts/run-postman-local.sh`, which executes the local collection above with
+[Newman](https://github.com/postmanlabs/newman) against whatever LocalStack/Terraform stack is
+currently up (`npm run local:setup` or `npm run test:integration:local` first). Newman is
+deliberately **not** a project `devDependency` — its dependency tree carries several known
+high/severity vulnerabilities (old `postman-request`/`handlebars`/`lodash` transitives) that
+would otherwise show up in this project's own `npm audit`. The script runs it via
+`npx --yes newman@<pinned version>` instead, which keeps it out of `package.json` and
+`package-lock.json` while still giving CI and local devs a one-command way to run the collection.
+
+Note: step 2 (`Upload PDF To Presigned URL`) depends on the `localhost.localstack.cloud`
+hostname resolving over public DNS (see "Project Notes" below); it fails in network-restricted
+sandboxes even though the other 7 requests pass.
+
+## Lambda Environment Variables
+
+The Lambdas receive the following values via Terraform:
+
+- `DOCUMENTS_BUCKET`
+- `DOCUMENTS_METADATA_TABLE`
+- `NOTIFICATION_QUEUE_URL`
+- `NOTIFICATION_TOPIC_ARN`
+- `AWS_EXECUTION_MODE` (`cloud` or `local`)
+- `AWS_ENDPOINT_URL` (local only)
+- `TEXTRACT_ROLE_ARN`, `TEXTRACT_TOPIC_ARN` (OCR Lambda only — used to start the async Textract job with an SNS completion notification)
+
+## Cloud Deployment
+
+> **Not exercised against real AWS.** This project targets LocalStack for all automated
+> validation (tests, CI). The steps below describe how `deployment_mode = "cloud"` *would* be
+> deployed to a real AWS account, but doing so requires your own AWS credentials, an existing
+> `lambda_artifacts_bucket`, and a built `thumbnail_lambda_image_uri` (ECR) — none of which this
+> repository provisions or has been run against. Review the Terraform plan carefully (cost,
+> IAM, KMS) before running `apply` in a real account.
+
+Use `environments/dev.tfvars` or `environments/prod.tfvars` with:
+
+- `deployment_mode = "cloud"`
+- `lambda_artifacts_bucket` configured
+- `lambda_artifacts_prefix` configured
+- `thumbnail_lambda_image_uri` configured to use the Thumbnail Lambda as a container image
+
+Commands:
+
+```bash
+cd infra/terraform
+terraform init -input=false
+terraform plan -var-file=environments/dev.tfvars
+terraform apply -input=false -var-file=environments/dev.tfvars
+```
+
+### Reference deploy/rollback pipelines (not active)
+
+[workflows/deploy.yml](workflows/deploy.yml) and [workflows/rollback.yml](workflows/rollback.yml)
+sketch what an OIDC-based deploy pipeline (ephemeral PR environments, dev-on-merge, approved
+prod, artifact-prefix rollback) would look like for this Terraform layout. They live outside
+`.github/workflows/`, so **GitHub never runs them** — they reference secrets
+(`AWS_ROLE_TO_ASSUME`, `LAMBDA_ARTIFACTS_BUCKET`, `TF_STATE_BUCKET`) that don't exist in this
+repository. Treat them as a design reference, not a working pipeline.
+
+## Tests and Quality
+
+```bash
+npm run lint              # ESLint (src and tests)
+npm run check              # tsc --noEmit against src (tsconfig.json)
+npm run check:tests        # tsc --noEmit against src + tests (tsconfig.tests.json)
+npm run test               # vitest run (unit tests, incl. the Step Functions ASL template)
+npm run test:coverage      # vitest run --coverage
+npm run build               # tsc -p tsconfig.json
+npm audit --omit=dev --audit-level=high   # production-dependency vulnerability check
+```
+
+`check` and `check:tests` are separate on purpose: `tsconfig.json` (`rootDir: "src"`,
+`outDir: "dist"`) is also what `npm run build` compiles, so it can't include `tests/`
+without either emitting test files into the Lambda build output or breaking the
+`rootDir` constraint. `tsconfig.tests.json` extends it with `noEmit` and a project-root
+`rootDir` just to typecheck `src/` + `tests/` together, without affecting the build.
+
+End-to-end and API-level checks require Docker (LocalStack) and Terraform:
+
+```bash
+npm run test:integration:local   # brings up LocalStack, applies Terraform, runs tests/integration/local-e2e.mjs
+npm run test:api:local           # runs the local Postman collection via Newman against that stack
+```
+
+### CI (`.github/workflows/ci.yml`)
+
+Three jobs run on every push/PR:
+
+- **quality**: `npm ci`, `npm audit --omit=dev`, lint, `check`, `check:tests`, `test:coverage`, build.
+- **terraform**: `terraform fmt -check`, `terraform init -backend=false`, `terraform validate`.
+  It does not run `terraform plan`/`apply` against real AWS, since that needs
+  environment-specific credentials this repo doesn't provision.
+- **local-stack-validation**: brings up LocalStack via Docker Compose, packages the Lambdas,
+  applies the local Terraform stack, runs the full integration/e2e suite
+  (`test:integration:local`) and the Postman/Newman collection (`test:api:local`) against it,
+  then tears everything down (`local:teardown`, run even if a previous step failed).
+
+Coverage target:
+
+- 100% for lines, functions, branches, and statements, enforced on
+  `src/contexts/**/application/use-cases/*.ts` and the idempotency adapter
+  (`aws-dynamo-idempotency-service.ts`) — the use-case layer and the atomic
+  claim/cache logic behind every idempotency guarantee in the system. The Step Functions
+  ASL template's selective-retry/Catch wiring is covered separately by
+  `tests/state-machine-template.test.ts`. The `ocr-callback` and `start-workflow` Lambda
+  handlers (task-token resolution, `ExecutionAlreadyExists` dedup) have their own unit
+  tests (`tests/unit/ocr-callback-handler.test.ts`, `tests/unit/start-workflow-handler.test.ts`)
+  outside the enforced coverage set. The remaining Lambda handlers in `src/functions/` and
+  the AWS adapters are exercised by the local integration flow (`npm run
+  test:integration:local`) and the Postman/Newman collection.
+
+## Project Notes
+
+- Upload idempotency prefers the `x-idempotency-key` header (the actual client-supplied
+  retry key) over `requestContext.requestId` (which is unique per HTTP request in a real
+  API Gateway deployment, so it can't dedupe client retries on its own). Both are wrapped
+  in the same atomic claim-and-cache flow described above: a genuine duplicate request
+  gets the original cached response back (`200`), not a `409`.
+- Step Functions retries only transient errors (`Lambda.ServiceException`, `Lambda.TooManyRequestsException`, `States.Timeout`).
+- The notification queue has a DLQ configured with `maxReceiveCount = 3`.
+- The notification queue visibility timeout is set to 120 seconds.
+- In local mode, OCR uses a mock fallback to avoid unsupported service dependencies (LocalStack Community has no Textract support). In cloud mode, OCR is genuinely asynchronous — see "Architecture" above.
+- The local presigned upload URL uses the `localhost.localstack.cloud` hostname, which resolves via public DNS to `127.0.0.1`. In network-restricted environments (offline dev, some CI runners/sandboxes) that lookup can fail even though LocalStack itself is reachable on `127.0.0.1:4566` — if `PUT` to the presigned URL fails with a DNS error, add a hosts-file entry (or an equivalent DNS override) for that hostname rather than assuming LocalStack is down.
+
+Local default endpoint: `http://127.0.0.1:4566`. To test with a real HTTP API, run in AWS (`deployment_mode = "cloud"`) or use a LocalStack edition with `apigatewayv2` support.

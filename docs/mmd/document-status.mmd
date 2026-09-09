@@ -1,0 +1,15 @@
+stateDiagram-v2
+    [*] --> UPLOADED: Upload Lambda: PutItem (initial metadata)
+    UPLOADED --> PROCESSING: Start-Workflow Lambda: UpdateItem, after StartExecution
+    PROCESSING --> PROCESSED: Metadata Lambda: saves the merged OCR/Thumbnail/Validation result
+    PROCESSING --> FAILED: Metadata Lambda: saveFailure, on any branch Catch (OCR, Thumbnail, Validation, or Merge/Persist)
+    PROCESSED --> [*]
+    FAILED --> [*]
+
+    note right of PROCESSING
+        DocumentStatus also defines OCR_COMPLETED and VALIDATED
+        (per-branch progress), but the current implementation only
+        persists the coarse-grained UPLOADED / PROCESSING / PROCESSED
+        / FAILED states to DynamoDB; per-branch progress lives in the
+        Step Functions execution state, not in the document record.
+    end note
