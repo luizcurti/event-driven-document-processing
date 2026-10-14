@@ -59,6 +59,15 @@ resource "aws_lambda_function" "this" {
   tags = merge(local.tags, {
     Name = "${local.name_prefix}-${each.key}"
   })
+
+  # CreateFunction / CreateEventSourceMapping check the execution role's permissions up front
+  # (sqs:SendMessage for the dead_letter_config, sqs:ReceiveMessage for the SQS trigger).
+  # Depending only on the role lets Terraform create the function before the role's policies
+  # exist, and AWS rejects it.
+  depends_on = [
+    aws_iam_role_policy.lambda_custom_access,
+    aws_iam_role_policy_attachment.lambda_basic_execution,
+  ]
 }
 
 resource "aws_cloudwatch_log_group" "lambda" {

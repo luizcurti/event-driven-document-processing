@@ -30,4 +30,10 @@ resource "aws_sfn_state_machine" "document_pipeline" {
   }
 
   tags = local.tags
+
+  # CreateStateMachine checks that the role can already deliver logs to log_destination.
+  depends_on = [
+    aws_iam_role_policy.step_functions_logs,
+    aws_iam_role_policy.step_functions_invoke_lambdas,
+  ]
 }
