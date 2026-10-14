@@ -8,7 +8,7 @@ resource "aws_lambda_function" "this" {
   handler                        = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : each.value.handler
   image_uri                      = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? var.thumbnail_lambda_image_uri : null
   timeout                        = each.value.timeout
-  reserved_concurrent_executions = each.value.reserved_concurrency
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_enabled ? each.value.reserved_concurrency : -1
   # Each apply that changes the code/config publishes an immutable numbered version
   # (below), which the "live" alias points at (see aws_lambda_alias.live) — the
   # prerequisite for a deploy pipeline to shift an alias between versions for

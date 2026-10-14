@@ -5,6 +5,9 @@ on:
     branches:
       - main
   pull_request:
+  # "Run workflow" on main re-runs the full pipeline and deploys `dev`, e.g. to
+  # recreate it after the Destroy workflow.
+  workflow_dispatch:
 
 jobs:
   quality:
@@ -63,6 +66,12 @@ jobs:
 
       - name: Terraform validate
         run: terraform -chdir=infra/terraform validate
+
+      - name: Terraform fmt/init/validate (bootstrap)
+        run: |
+          terraform -chdir=infra/bootstrap fmt -check -recursive
+          terraform -chdir=infra/bootstrap init -backend=false -input=false
+          terraform -chdir=infra/bootstrap validate
 
       - name: Setup tflint
         uses: terraform-linters/setup-tflint@v4
@@ -133,3 +142,160 @@ jobs:
       - name: Tear down LocalStack and local Terraform stack
         if: always()
         run: npm run local:teardown
+
+  # Deploys infra/terraform with environments/dev.tfvars to real AWS on every push to
+  # main (or a manual run on main), once every other job passes. Auth is GitHub OIDC ->
+  # the IAM role created by infra/bootstrap, so no AWS keys are stored in GitHub.
+  # Configuration lives in the `dev` GitHub environment (README -> "Cloud Deployment");
+  # until AWS_DEPLOY_ROLE_ARN is set there, the job skips the AWS steps and stays green.
+  # prod is not deployed by CI.
+  deploy:
+    name: Deploy dev to AWS
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [quality, terraform, local-stack-validation]
+    environment: dev
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    env:
+      TF_DIR: infra/terraform
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      TF_VAR_lambda_artifacts_bucket: ${{ vars.LAMBDA_ARTIFACTS_BUCKET }}
+      # New AWS accounts start with a 10-execution Lambda concurrency quota, which
+      # leaves nothing to reserve (AWS keeps 10 unreserved). Set
+      # LAMBDA_RESERVED_CONCURRENCY_ENABLED=true in the `dev` environment once the
+      # quota is raised (the stack reserves 65 in total).
+      TF_VAR_lambda_reserved_concurrency_enabled: ${{ vars.LAMBDA_RESERVED_CONCURRENCY_ENABLED || 'false' }}
+      TF_IN_AUTOMATION: "true"
+    steps:
+      - name: Check deploy configuration
+        id: config
+        env:
+          ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::notice title=Deploy skipped::AWS_DEPLOY_ROLE_ARN is not set in the dev environment. See README -> Cloud Deployment."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          missing=""
+          [ -z "$AWS_REGION" ] && missing="$missing AWS_REGION"
+          [ -z "$STATE_BUCKET" ] && missing="$missing TF_STATE_BUCKET"
+          [ -z "$TF_VAR_lambda_artifacts_bucket" ] && missing="$missing LAMBDA_ARTIFACTS_BUCKET"
+          if [ -n "$missing" ]; then
+            echo "::error title=Deploy misconfigured::Missing in the dev environment:$missing"
+            exit 1
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        if: steps.config.outputs.enabled == 'true'
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        if: steps.config.outputs.enabled == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.x
+          cache: npm
+
+      # Same esbuild bundle the LocalStack flow deploys: one zip with every handler
+      # (functions/*.js), @aws-sdk/* left to the Lambda runtime.
+      - name: Bundle Lambdas
+        if: steps.config.outputs.enabled == 'true'
+        run: |
+          npm ci
+          npm run package:local
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.config.outputs.enabled == 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: gha-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # Published under a content-addressed prefix, so an unchanged bundle maps to the
+      # same S3 keys and doesn't redeploy (or publish new versions of) every function.
+      - name: Publish Lambda artifacts
+        if: steps.config.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          HASH=$(openssl dgst -sha256 -binary dist/lambda.zip | base64)
+          SHORT=$(sha256sum dist/lambda.zip | cut -c1-16)
+          PREFIX="lambdas/dev/${SHORT}"
+          FUNCTIONS="upload get_document start_workflow ocr ocr_callback thumbnail validation merge_results metadata notification"
+          aws s3 cp dist/lambda.zip "s3://${TF_VAR_lambda_artifacts_bucket}/${PREFIX}/bundle.zip" --only-show-errors
+          hashes="{"
+          for fn in $FUNCTIONS; do
+            aws s3 cp "s3://${TF_VAR_lambda_artifacts_bucket}/${PREFIX}/bundle.zip" "s3://${TF_VAR_lambda_artifacts_bucket}/${PREFIX}/${fn}.zip" --only-show-errors
+            hashes="${hashes}\"${fn}\":\"${HASH}\","
+          done
+          hashes="${hashes%,}}"
+          echo "TF_VAR_lambda_artifacts_prefix=${PREFIX}" >> "$GITHUB_ENV"
+          echo "TF_VAR_lambda_artifact_hashes=${hashes}" >> "$GITHUB_ENV"
+          echo "Published ${PREFIX}"
+
+      - name: Setup Terraform
+        if: steps.config.outputs.enabled == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.0"
+          terraform_wrapper: false
+
+      # The S3 backend is only added here, at deploy time: the local (LocalStack) flow and
+      # the validate job keep using local state / -backend=false.
+      - name: Terraform init (S3 remote state)
+        if: steps.config.outputs.enabled == 'true'
+        env:
+          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          printf 'terraform {\n  backend "s3" {}\n}\n' > "$TF_DIR/ci_backend.tf"
+          terraform -chdir="$TF_DIR" init -input=false \
+            -backend-config="bucket=${STATE_BUCKET}" \
+            -backend-config="key=document-processing/dev.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform plan
+        if: steps.config.outputs.enabled == 'true'
+        shell: bash # bash -eo pipefail, so `| tee` keeps Terraform's exit code
+        run: terraform -chdir="$TF_DIR" plan -input=false -no-color -var-file=environments/dev.tfvars -out=tfplan 2>&1 | tee plan.log
+
+      - name: Terraform apply
+        if: steps.config.outputs.enabled == 'true'
+        shell: bash # bash -eo pipefail, so `| tee` keeps Terraform's exit code
+        run: terraform -chdir="$TF_DIR" apply -input=false -no-color tfplan 2>&1 | tee apply.log
+
+      # Surface each Terraform "Error:" block as a run annotation, so failures are
+      # readable from the run summary / checks API without the raw job log.
+      - name: Report Terraform errors
+        if: failure() && steps.config.outputs.enabled == 'true'
+        run: |
+          for f in plan.log apply.log; do
+            [ -f "$f" ] || continue
+            awk '{ gsub(/%/, "%25") }
+                 /^Error: / { if (buf) print buf; buf = $0; n = 0; next }
+                 buf && n < 15 { buf = buf "%0A" $0; n++ }
+                 END { if (buf) print buf }' "$f" |
+              while IFS= read -r block; do echo "::error title=Terraform ($f)::${block}"; done
+          done
+
+      # Routes use AWS_IAM authorization, so an unsigned request must be rejected with 403:
+      # proves the API, routes and stage are live without needing invoke permissions here.
+      - name: Smoke test
+        if: steps.config.outputs.enabled == 'true'
+        run: |
+          API_URL=$(terraform -chdir="$TF_DIR" output -raw api_url)
+          echo "API: ${API_URL}"
+          code=$(curl -s -o /dev/null -w '%{http_code}' --retry 5 --retry-delay 5 --retry-all-errors "${API_URL}/documents/smoke-test")
+          echo "Unsigned GET /documents/smoke-test -> ${code}"
+          [ "$code" = "403" ] || { echo "::error::Expected 403 for an unsigned request, got ${code}"; exit 1; }
+          echo "### Deployed dev :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "API URL: ${API_URL}" >> "$GITHUB_STEP_SUMMARY"
