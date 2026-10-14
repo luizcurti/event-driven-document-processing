@@ -1,9 +1,17 @@
+# S3 bucket names are global across every AWS account, so in the cloud the name carries
+# this account's ID: the bare "<project>-<env>-documents" is generic enough to already be
+# taken (CreateBucket fails with BucketAlreadyExists). LocalStack keeps the short name the
+# local scripts and tests use.
+locals {
+  documents_bucket_name = var.deployment_mode == "cloud" ? "${local.name_prefix}-documents-${data.aws_caller_identity.current.account_id}" : "${local.name_prefix}-documents"
+}
+
 resource "aws_s3_bucket" "documents" {
-  bucket        = "${local.name_prefix}-documents"
+  bucket        = local.documents_bucket_name
   force_destroy = var.documents_bucket_force_destroy
 
   tags = merge(local.tags, {
-    Name = "${local.name_prefix}-documents"
+    Name = local.documents_bucket_name
   })
 }
 
