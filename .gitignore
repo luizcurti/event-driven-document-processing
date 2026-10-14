@@ -9,3 +9,7 @@ coverage
 .terraform.lock.hcl
 *.tfstate
 *.tfstate.backup
+
+# CI writes this before `terraform init` to add the S3 backend at deploy time.
+infra/terraform/ci_backend.tf
+tfplan

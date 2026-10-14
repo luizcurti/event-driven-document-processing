@@ -66,7 +66,7 @@ variable "enable_step_functions" {
 variable "aws_region" {
   description = "AWS region."
   type        = string
-  default     = "us-east-1"
+  default     = "eu-west-2"
 }
 
 variable "documents_bucket_force_destroy" {
@@ -133,4 +133,10 @@ variable "budget_alert_email" {
   description = "Email address notified when monthly_budget_usd is forecast/exceeded. Leave empty to skip creating the budget."
   type        = string
   default     = ""
+}
+
+variable "lambda_reserved_concurrency_enabled" {
+  description = "Apply each function's reserved_concurrency from locals.lambda_config (65 in total). Turn off on accounts whose Lambda concurrency quota is still the new-account default of 10, where any reservation fails (AWS keeps 10 unreserved)."
+  type        = bool
+  default     = true
 }

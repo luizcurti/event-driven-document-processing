@@ -1,0 +1,89 @@
+name: Destroy
+
+# Manually tears down the dev stack (infra/terraform + environments/dev.tfvars) in real
+# AWS to stop paying for it while unused. Recreate it with the CI workflow's "Run
+# workflow" button (or any push to main). The infra/bootstrap resources (state and
+# artifacts buckets, deploy role) are kept.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to delete every AWS resource of the dev stack (documents and metadata included)'
+        required: true
+        type: string
+
+jobs:
+  destroy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    env:
+      TF_DIR: infra/terraform
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      TF_VAR_lambda_artifacts_bucket: ${{ vars.LAMBDA_ARTIFACTS_BUCKET }}
+      TF_VAR_lambda_reserved_concurrency_enabled: ${{ vars.LAMBDA_RESERVED_CONCURRENCY_ENABLED || 'false' }}
+      TF_IN_AUTOMATION: "true"
+    steps:
+      - name: Check confirmation
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "destroy" ]; then
+            echo "::error title=Not confirmed::Type exactly \"destroy\" to run this workflow."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: gha-destroy-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.0"
+          terraform_wrapper: false
+
+      - name: Terraform init (S3 remote state)
+        env:
+          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          printf 'terraform {\n  backend "s3" {}\n}\n' > "$TF_DIR/ci_backend.tf"
+          terraform -chdir="$TF_DIR" init -input=false \
+            -backend-config="bucket=${STATE_BUCKET}" \
+            -backend-config="key=document-processing/dev.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform destroy
+        shell: bash # bash -eo pipefail, so `| tee` keeps Terraform's exit code
+        run: terraform -chdir="$TF_DIR" destroy -auto-approve -input=false -no-color -var-file=environments/dev.tfvars 2>&1 | tee destroy.log
+
+      - name: Report Terraform errors
+        if: failure()
+        run: |
+          [ -f destroy.log ] || exit 0
+          awk '{ gsub(/%/, "%25") }
+               /^Error: / { if (buf) print buf; buf = $0; n = 0; next }
+               buf && n < 15 { buf = buf "%0A" $0; n++ }
+               END { if (buf) print buf }' destroy.log |
+            while IFS= read -r block; do echo "::error title=Terraform (destroy.log)::${block}"; done
+
+      - name: Summary
+        run: |
+          echo "### dev destroyed :wastebasket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "Recreate it with **Actions -> CI -> Run workflow** on \`main\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "The stack's KMS key is scheduled for deletion (7-day window), not deleted immediately." >> "$GITHUB_STEP_SUMMARY"

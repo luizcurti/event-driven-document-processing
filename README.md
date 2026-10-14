@@ -2,12 +2,10 @@
 
 Serverless, event-driven PDF processing platform built with Node.js, TypeScript, Terraform, and AWS services.
 
-> **Demo/portfolio project, not a production deployment.** Everything here — unit/integration
-> tests, the Postman collection, CI — is validated end-to-end against **LocalStack** (Docker),
-> never against a real AWS account. The Terraform code for `deployment_mode = "cloud"` (API
-> Gateway, real Textract, WAF, etc.) is written to be realistic and passes `terraform
-> validate`, but it has never been `apply`'d to live AWS — see "Cloud Deployment" below before
-> considering it production-ready.
+> **Demo/portfolio project, not a production deployment.** Unit/integration tests and the
+> Postman collection are validated end-to-end against **LocalStack** (Docker). On top of that,
+> the `dev` environment (`deployment_mode = "cloud"`) is deployed to a real AWS account by CI —
+> see "Cloud Deployment" below. `prod` has never been applied.
 
 ## Architecture
 
@@ -409,37 +407,76 @@ The Lambdas receive the following values via Terraform:
 
 ## Cloud Deployment
 
-> **Not exercised against real AWS.** This project targets LocalStack for all automated
-> validation (tests, CI). The steps below describe how `deployment_mode = "cloud"` *would* be
-> deployed to a real AWS account, but doing so requires your own AWS credentials, an existing
-> `lambda_artifacts_bucket`, and a built `thumbnail_lambda_image_uri` (ECR) — none of which this
-> repository provisions or has been run against. Review the Terraform plan carefully (cost,
-> IAM, KMS) before running `apply` in a real account.
+`dev` is deployed to real AWS (`eu-west-2`) by the `deploy` job in
+[.github/workflows/ci.yml](.github/workflows/ci.yml) on every push to `main` (or **Actions → CI →
+Run workflow** on `main`), after `quality`, `terraform` and `local-stack-validation` pass. It
+authenticates with GitHub OIDC, so no AWS keys are stored in GitHub, and:
 
-Use `environments/dev.tfvars` or `environments/prod.tfvars` with:
+1. bundles the Lambdas exactly like the LocalStack flow (`npm run package:local`),
+2. publishes the zip to the artifacts bucket under a content-addressed prefix
+   (`lambdas/dev/<sha256-prefix>/<function>.zip`, so an unchanged bundle doesn't redeploy anything),
+3. runs `terraform plan` + `apply` with `environments/dev.tfvars` against an S3 backend (added only
+   at deploy time, so the local flow and `terraform validate` keep working without one),
+4. smoke-tests the API: an unsigned `GET /documents/{id}` must return `403`, since every route uses
+   `AWS_IAM` authorization.
 
-- `deployment_mode = "cloud"`
-- `lambda_artifacts_bucket` configured
-- `lambda_artifacts_prefix` configured
-- `thumbnail_lambda_image_uri` configured to use the Thumbnail Lambda as a container image
+`prod` is not deployed by CI.
 
-Commands:
+Two cloud-only settings in `environments/{dev,prod}.tfvars`:
+
+- `enable_waf = false` — AWS WAF can't be associated with API Gateway **HTTP** APIs (only REST APIs,
+  ALB, CloudFront, AppSync…), so the web ACL association fails against real AWS for this stack.
+  Access is gated by `AWS_IAM` route authorization and stage throttling instead.
+- Reserved concurrency (65 in total, see `locals.lambda_config`) is turned off by the pipeline
+  (`lambda_reserved_concurrency_enabled = false`) unless the `LAMBDA_RESERVED_CONCURRENCY_ENABLED`
+  environment variable is `true`: new AWS accounts start with a 10-execution Lambda concurrency
+  quota, which leaves nothing to reserve.
+
+### One-time setup (`infra/bootstrap`)
+
+[infra/bootstrap](infra/bootstrap) holds what the pipeline needs before it can run: the remote-state
+bucket (native S3 locking), the Lambda artifacts bucket, the GitHub OIDC provider and the
+`event-driven-document-processing-github-deploy` role. Only jobs in this repository's `dev` GitHub
+environment can assume the role; its permissions are scoped to resources named with the
+`document-processing-platform-` prefix wherever AWS supports it (the KMS key by its `Project` tag),
+and it can only attach the two AWS-managed policies the stack uses.
+
+```bash
+cd infra/bootstrap
+terraform init
+terraform apply   # add -var="create_oidc_provider=false" if the account already has the GitHub OIDC provider
+```
+
+Then, in GitHub → Settings → Environments, create `dev` and add the variables
+`AWS_DEPLOY_ROLE_ARN`, `TF_STATE_BUCKET`, `LAMBDA_ARTIFACTS_BUCKET` and `AWS_REGION` from the
+bootstrap outputs. Until `AWS_DEPLOY_ROLE_ARN` is set, the `deploy` job skips its AWS steps.
+
+### Tear down / recreate
+
+**Actions → Destroy → Run workflow** on `main` (type `destroy` to confirm) runs `terraform destroy`
+for `dev` against the same state: the documents bucket (`force_destroy` in dev), metadata table,
+queues, Lambdas, state machine and API are deleted, and the KMS key is scheduled for deletion
+(7-day window). The bootstrap resources are kept, so recreating it is just **Run workflow** on CI.
+
+### Manual deploy
+
+The same stack can be applied by hand with your own credentials, after uploading the bundle to
+`s3://<lambda_artifacts_bucket>/<lambda_artifacts_prefix>/<function>.zip`:
 
 ```bash
 cd infra/terraform
 terraform init -input=false
-terraform plan -var-file=environments/dev.tfvars
-terraform apply -input=false -var-file=environments/dev.tfvars
+terraform apply -var-file=environments/dev.tfvars \
+  -var="lambda_artifacts_bucket=<bucket>" -var="lambda_artifacts_prefix=<prefix>" \
+  -var="lambda_reserved_concurrency_enabled=false"
 ```
 
 ### Reference deploy/rollback pipelines (not active)
 
 [workflows/deploy.yml](workflows/deploy.yml) and [workflows/rollback.yml](workflows/rollback.yml)
-sketch what an OIDC-based deploy pipeline (ephemeral PR environments, dev-on-merge, approved
-prod, artifact-prefix rollback) would look like for this Terraform layout. They live outside
-`.github/workflows/`, so **GitHub never runs them** — they reference secrets
-(`AWS_ROLE_TO_ASSUME`, `LAMBDA_ARTIFACTS_BUCKET`, `TF_STATE_BUCKET`) that don't exist in this
-repository. Treat them as a design reference, not a working pipeline.
+sketch a broader design (ephemeral PR environments, approved prod, artifact-prefix rollback). They
+live outside `.github/workflows/`, so **GitHub never runs them**; the active pipeline is the
+`deploy` job described above.
 
 ## Tests and Quality
 
@@ -468,16 +505,18 @@ npm run test:api:local           # runs the local Postman collection via Newman 
 
 ### CI (`.github/workflows/ci.yml`)
 
-Three jobs run on every push/PR:
+Three jobs run on every push/PR, plus a fourth on `main`:
 
 - **quality**: `npm ci`, `npm audit --omit=dev`, lint, `check`, `check:tests`, `test:coverage`, build.
-- **terraform**: `terraform fmt -check`, `terraform init -backend=false`, `terraform validate`.
-  It does not run `terraform plan`/`apply` against real AWS, since that needs
-  environment-specific credentials this repo doesn't provision.
+- **terraform**: `terraform fmt -check`, `terraform init -backend=false`, `terraform validate`
+  (for `infra/terraform` and `infra/bootstrap`), tflint and checkov.
 - **local-stack-validation**: brings up LocalStack via Docker Compose, packages the Lambdas,
   applies the local Terraform stack, runs the full integration/e2e suite
   (`test:integration:local`) and the Postman/Newman collection (`test:api:local`) against it,
   then tears everything down (`local:teardown`, run even if a previous step failed).
+- **deploy** (push to `main` or manual run, after the three above): deploys `dev` to real AWS via
+  GitHub OIDC — see [Cloud Deployment](#cloud-deployment). A separate manual **Destroy** workflow
+  (`.github/workflows/destroy.yml`) tears it down.
 
 Coverage target:
 
