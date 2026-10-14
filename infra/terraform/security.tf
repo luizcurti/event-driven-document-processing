@@ -65,7 +65,11 @@ data "aws_iam_policy_document" "kms_key" {
         "s3.amazonaws.com",
         "dynamodb.amazonaws.com",
         "sqs.amazonaws.com",
-        "sns.amazonaws.com"
+        "sns.amazonaws.com",
+        # Publish to the CMK-encrypted notifications topic: EventBridge (failed-execution
+        # rule target) and CloudWatch (alarm actions) need the key, not just the topic policy.
+        "events.amazonaws.com",
+        "cloudwatch.amazonaws.com"
       ]
     }
 

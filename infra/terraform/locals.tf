@@ -70,6 +70,11 @@ locals {
   # Step Functions Task) return the error straight to their caller instead.
   async_invoked_lambdas = ["start_workflow", "ocr_callback"]
 
+  # Built from the name rather than referencing aws_sfn_state_machine.document_pipeline:
+  # the state machine depends on the Lambdas, which depend on their role policies
+  # (lambda.tf), so a direct reference here would be a dependency cycle.
+  state_machine_arn = "arn:aws:states:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:stateMachine:${local.name_prefix}-pipeline"
+
   # Least-privilege building blocks, reused across the per-function statements below.
   dynamo_idempotency_actions = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
   kms_actions = [
@@ -93,7 +98,7 @@ locals {
       { sid = "KmsUsage", actions = local.kms_actions, resources = [aws_kms_key.platform.arn] }
     ]
     start_workflow = [
-      { sid = "StartPipeline", actions = ["states:StartExecution"], resources = var.enable_step_functions ? [aws_sfn_state_machine.document_pipeline[0].arn] : ["*"] },
+      { sid = "StartPipeline", actions = ["states:StartExecution"], resources = var.enable_step_functions ? [local.state_machine_arn] : ["*"] },
       { sid = "MetadataStatusUpdate", actions = ["dynamodb:UpdateItem"], resources = [aws_dynamodb_table.documents_metadata.arn] },
       { sid = "InvocationDlq", actions = ["sqs:SendMessage"], resources = [aws_sqs_queue.lambda_invocations_dlq.arn] },
       { sid = "KmsUsage", actions = local.kms_actions, resources = [aws_kms_key.platform.arn] }

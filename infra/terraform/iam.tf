@@ -96,6 +96,35 @@ resource "aws_iam_role_policy" "step_functions_invoke_lambdas" {
   policy = data.aws_iam_policy_document.step_functions_invoke_lambdas[0].json
 }
 
+# Required for the logging_configuration set on aws_sfn_state_machine.document_pipeline:
+# Step Functions delivers execution logs through CloudWatch Logs' vended-log delivery API,
+# authorized as the state machine's role. These actions don't support resource-level
+# permissions, so "*" is the documented scope.
+data "aws_iam_policy_document" "step_functions_logs" {
+  count = var.enable_step_functions ? 1 : 0
+
+  statement {
+    actions = [
+      "logs:CreateLogDelivery",
+      "logs:GetLogDelivery",
+      "logs:UpdateLogDelivery",
+      "logs:DeleteLogDelivery",
+      "logs:ListLogDeliveries",
+      "logs:PutResourcePolicy",
+      "logs:DescribeResourcePolicies",
+      "logs:DescribeLogGroups",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "step_functions_logs" {
+  count  = var.enable_step_functions ? 1 : 0
+  name   = "${local.name_prefix}-sfn-logs-delivery"
+  role   = aws_iam_role.step_functions[0].id
+  policy = data.aws_iam_policy_document.step_functions_logs[0].json
+}
+
 # Required for the tracing_configuration set on aws_sfn_state_machine.document_pipeline.
 resource "aws_iam_role_policy_attachment" "step_functions_xray" {
   count      = var.enable_step_functions ? 1 : 0
