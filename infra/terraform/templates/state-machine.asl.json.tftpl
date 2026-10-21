@@ -1,0 +1,290 @@
+{
+  "Comment": "Document processing pipeline",
+  "StartAt": "NormalizeInput",
+  "States": {
+    "NormalizeInput": {
+      "Type": "Pass",
+      "Parameters": {
+        "bucket.$": "$.bucket",
+        "key.$": "$.key",
+        "documentId.$": "$.documentId"
+      },
+      "Next": "FanOutProcessing"
+    },
+    "FanOutProcessing": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "OCR",
+          "States": {
+            "OCR": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+              "Parameters": {
+                "FunctionName": "${ocr_lambda_arn}",
+                "Payload": {
+                  "taskToken.$": "$$.Task.Token",
+                  "documentId.$": "$.documentId",
+                  "bucket.$": "$.bucket",
+                  "key.$": "$.key",
+                  "eventId.$": "States.Format('ocr#{}#{}', $.documentId, $.key)"
+                }
+              },
+              "ResultPath": "$.ocr",
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.TooManyRequestsException",
+                    "States.Timeout"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "RecordFailureOCR"
+                }
+              ],
+              "End": true
+            },
+            "RecordFailureOCR": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${metadata_lambda_arn}",
+                "Payload": {
+                  "documentId.$": "$.documentId",
+                  "status": "FAILED",
+                  "errorMessage.$": "States.Format('OCR failed: {}', $.error.Cause)"
+                }
+              },
+              "OutputPath": "$.Payload",
+              "Next": "FailOCR"
+            },
+            "FailOCR": {
+              "Type": "Fail",
+              "Error": "OcrFailed",
+              "Cause": "OCR branch failed"
+            }
+          }
+        },
+        {
+          "StartAt": "Thumbnail",
+          "States": {
+            "Thumbnail": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${thumbnail_lambda_arn}",
+                "Payload": {
+                  "documentId.$": "$.documentId",
+                  "bucket.$": "$.bucket",
+                  "key.$": "$.key",
+                  "eventId.$": "States.Format('thumbnail#{}#{}', $.documentId, $.key)"
+                }
+              },
+              "ResultSelector": {
+                "thumbnail.$": "$.Payload"
+              },
+              "OutputPath": "$.thumbnail",
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.TooManyRequestsException",
+                    "States.Timeout"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "RecordFailureThumbnail"
+                }
+              ],
+              "End": true
+            },
+            "RecordFailureThumbnail": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${metadata_lambda_arn}",
+                "Payload": {
+                  "documentId.$": "$.documentId",
+                  "status": "FAILED",
+                  "errorMessage.$": "States.Format('Thumbnail failed: {}', $.error.Cause)"
+                }
+              },
+              "OutputPath": "$.Payload",
+              "Next": "FailThumbnail"
+            },
+            "FailThumbnail": {
+              "Type": "Fail",
+              "Error": "ThumbnailFailed",
+              "Cause": "Thumbnail branch failed"
+            }
+          }
+        },
+        {
+          "StartAt": "Validation",
+          "States": {
+            "Validation": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${validation_lambda_arn}",
+                "Payload": {
+                  "documentId.$": "$.documentId",
+                  "bucket.$": "$.bucket",
+                  "key.$": "$.key",
+                  "eventId.$": "States.Format('validation#{}#{}', $.documentId, $.key)"
+                }
+              },
+              "ResultSelector": {
+                "validation.$": "$.Payload"
+              },
+              "OutputPath": "$.validation",
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.TooManyRequestsException",
+                    "States.Timeout"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["ValidationError"],
+                  "ResultPath": "$.error",
+                  "Next": "RecordFailureValidation"
+                },
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "RecordFailureValidation"
+                }
+              ],
+              "End": true
+            },
+            "RecordFailureValidation": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${metadata_lambda_arn}",
+                "Payload": {
+                  "documentId.$": "$.documentId",
+                  "status": "FAILED",
+                  "errorMessage.$": "States.Format('Validation failed: {}', $.error.Cause)"
+                }
+              },
+              "OutputPath": "$.Payload",
+              "Next": "FailValidation"
+            },
+            "FailValidation": {
+              "Type": "Fail",
+              "Error": "ValidationFailed",
+              "Cause": "Validation branch failed"
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.parallelResults",
+      "Next": "NormalizeParallelOutput"
+    },
+    "NormalizeParallelOutput": {
+      "Type": "Pass",
+      "Parameters": {
+        "documentId.$": "$.documentId",
+        "bucket.$": "$.bucket",
+        "key.$": "$.key",
+        "ocr.$": "$.parallelResults[0].ocr",
+        "thumbnail.$": "$.parallelResults[1]",
+        "validation.$": "$.parallelResults[2]"
+      },
+      "Next": "MergeResults"
+    },
+    "MergeResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${merge_results_lambda_arn}",
+        "Payload": {
+          "documentId.$": "$.documentId",
+          "ocr.$": "$.ocr",
+          "thumbnail.$": "$.thumbnail",
+          "validation.$": "$.validation"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "RecordFailurePipeline"
+        }
+      ],
+      "Next": "PersistMetadata"
+    },
+    "PersistMetadata": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${metadata_lambda_arn}",
+        "Payload.$": "$"
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.TooManyRequestsException",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "RecordFailurePipeline"
+        }
+      ],
+      "End": true
+    },
+    "RecordFailurePipeline": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${metadata_lambda_arn}",
+        "Payload": {
+          "documentId.$": "$.documentId",
+          "status": "FAILED",
+          "errorMessage.$": "States.Format('Pipeline failed: {}', $.error.Cause)"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Next": "FailPipeline"
+    },
+    "FailPipeline": {
+      "Type": "Fail",
+      "Error": "PipelineFailed",
+      "Cause": "Document processing failed"
+    }
+  }
+}

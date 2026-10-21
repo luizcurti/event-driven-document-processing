@@ -1,0 +1,39 @@
+flowchart TB
+    start(["StartAt"]) --> normalize["NormalizeInput"]
+    normalize --> fanout{{"FanOutProcessing\n(Parallel)"}}
+
+    subgraph ocrBranch["OCR branch"]
+        ocr["OCR\nwaitForTaskToken\nRetry: transient errors only"]
+        ocrFailRecord["RecordFailureOCR\nwrite status=FAILED"]
+        ocrFail(["FailOCR"])
+        ocr -->|Catch: States.ALL| ocrFailRecord --> ocrFail
+    end
+
+    subgraph thumbBranch["Thumbnail branch"]
+        thumb["Thumbnail\nRetry: transient errors only"]
+        thumbFailRecord["RecordFailureThumbnail\nwrite status=FAILED"]
+        thumbFail(["FailThumbnail"])
+        thumb -->|Catch: States.ALL| thumbFailRecord --> thumbFail
+    end
+
+    subgraph validBranch["Validation branch"]
+        valid["Validation\nRetry: transient errors only"]
+        validFailRecord["RecordFailureValidation\nwrite status=FAILED"]
+        validFail(["FailValidation"])
+        valid -->|"Catch: ValidationError (no retry) or States.ALL"| validFailRecord --> validFail
+    end
+
+    fanout --> ocr
+    fanout --> thumb
+    fanout --> valid
+
+    ocr -->|success| joinResults["NormalizeParallelOutput"]
+    thumb -->|success| joinResults
+    valid -->|success| joinResults
+
+    joinResults --> mergeResults["MergeResults"]
+    mergeResults -->|Catch: States.ALL| pipelineFailRecord["RecordFailurePipeline\nwrite status=FAILED"]
+    mergeResults --> persist["PersistMetadata\nRetry: transient errors only"]
+    persist -->|Catch: States.ALL| pipelineFailRecord
+    persist --> done(["End"])
+    pipelineFailRecord --> pipelineFail(["FailPipeline"])

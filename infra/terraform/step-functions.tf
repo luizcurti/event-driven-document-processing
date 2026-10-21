@@ -1,0 +1,39 @@
+resource "aws_cloudwatch_log_group" "step_functions" {
+  count             = var.enable_step_functions ? 1 : 0
+  name              = "/aws/vendedlogs/states/${local.name_prefix}-pipeline"
+  retention_in_days = var.logs_retention_in_days
+  kms_key_id        = aws_kms_key.platform.arn
+  tags              = local.tags
+}
+
+resource "aws_sfn_state_machine" "document_pipeline" {
+  count    = var.enable_step_functions ? 1 : 0
+  name     = "${local.name_prefix}-pipeline"
+  role_arn = aws_iam_role.step_functions[0].arn
+
+  definition = templatefile("${path.module}/templates/state-machine.asl.json.tftpl", {
+    ocr_lambda_arn           = aws_lambda_function.this["ocr"].arn
+    thumbnail_lambda_arn     = aws_lambda_function.this["thumbnail"].arn
+    validation_lambda_arn    = aws_lambda_function.this["validation"].arn
+    merge_results_lambda_arn = aws_lambda_function.this["merge_results"].arn
+    metadata_lambda_arn      = aws_lambda_function.this["metadata"].arn
+  })
+
+  logging_configuration {
+    level                  = "ALL"
+    include_execution_data = true
+    log_destination        = "${aws_cloudwatch_log_group.step_functions[0].arn}:*"
+  }
+
+  tracing_configuration {
+    enabled = true
+  }
+
+  tags = local.tags
+
+  # CreateStateMachine checks that the role can already deliver logs to log_destination.
+  depends_on = [
+    aws_iam_role_policy.step_functions_logs,
+    aws_iam_role_policy.step_functions_invoke_lambdas,
+  ]
+}

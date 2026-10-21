@@ -1,0 +1,33 @@
+flowchart TB
+    subgraph local["Local development (docker-compose.local.yml)"]
+        direction TB
+        localstack["localstack/localstack:4.1.1\nS3, DynamoDB, SQS, SNS, Lambda,\nEventBridge, Step Functions, IAM, KMS, STS"]
+        pushgw["prom/pushgateway\nreceives per-invocation metrics"]
+        prom["prom/prometheus\nscrapes pushgateway"]
+        loki["grafana/loki"]
+        promtail["grafana/promtail\ntails Lambda containers\nvia the Docker socket"]
+        grafana["grafana/grafana\ndashboards: Lambdas Overview, Lambda Logs"]
+
+        promtail --> loki --> grafana
+        pushgw --> prom --> grafana
+        localstack -.->|Lambda containers'\nstdout/stderr JSON logs| promtail
+    end
+
+    terraformLocal["Terraform\n-var-file=environments/local.tfvars\ndeployment_mode=local"]
+    terraformLocal --> localstack
+
+    subgraph cloud["AWS Cloud (environments/dev.tfvars or prod.tfvars)"]
+        direction TB
+        apigwCloud["API Gateway + WAF\nCognito/API-Key or AWS_IAM"]
+        lambdaCloud["Lambda functions\n(zip artifacts from S3,\nThumbnail as a container image)"]
+        managedAws["S3, DynamoDB, SQS, SNS,\nEventBridge, Step Functions,\nTextract, KMS, CloudWatch"]
+
+        apigwCloud --> lambdaCloud --> managedAws
+    end
+
+    terraformCloud["Terraform\n-var-file=environments/dev.tfvars\ndeployment_mode=cloud"]
+    terraformCloud --> cloud
+
+    dev["Developer / CI runner"] --> terraformLocal
+    dev -.->|npm run package:local\nesbuild bundle -> dist/lambda.zip| localstack
+    ops["Operator (manual apply)"] --> terraformCloud

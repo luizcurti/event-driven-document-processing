@@ -1,0 +1,36 @@
+sequenceDiagram
+    actor Client
+    participant API as API Gateway (AWS_IAM)
+    participant Upload as Upload Lambda
+    participant Idem as Idempotency Service\n(DynamoDB claim-and-cache)
+    participant DDB as DynamoDB\ndocuments-metadata
+    participant S3 as S3 documents bucket
+    participant EB as EventBridge
+    participant SFN as Step Functions
+
+    Client->>API: POST /documents\n{fileName, contentType}\nx-idempotency-key
+    API->>Upload: invoke
+    Upload->>Idem: claim(idempotencyKey)
+    alt key already COMPLETED (duplicate request)
+        Idem-->>Upload: cached result
+        Upload-->>API: 200 (cached uploadUrl)
+    else new key or IN_PROGRESS crash-recovery
+        Idem-->>Upload: proceed
+        Upload->>Upload: generate documentId
+        Upload->>DDB: PutItem status=UPLOADED
+        Upload->>S3: presigned PUT URL
+        Upload->>Idem: mark COMPLETED (cache result)
+        Upload-->>API: 200 {documentId, uploadUrl}
+    end
+    API-->>Client: 200 {documentId, uploadUrl}
+
+    Client->>S3: PUT file (presigned URL)
+    S3->>EB: ObjectCreated event
+    EB->>SFN: StartExecution(name=documentId)
+    Note over SFN: Duplicate S3 events for the same\ndocumentId hit ExecutionAlreadyExists\nand are safely ignored (no re-processing)
+    SFN->>DDB: UpdateItem status=PROCESSING
+
+    Client->>API: GET /documents/{documentId}
+    API->>DDB: GetItem
+    DDB-->>API: status, timestamps, errorMessage
+    API-->>Client: 200 current status

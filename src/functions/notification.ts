@@ -1,0 +1,42 @@
+import { SQSEvent } from "aws-lambda";
+import { SendNotificationUseCase } from "../contexts/notification/application/use-cases/send-notification-use-case";
+import { AwsSnsNotificationSender } from "../contexts/notification/infrastructure/adapters/aws-sns-notification-sender";
+import { requireEnv } from "../shared/infrastructure/aws/aws-client-config";
+import { runIdempotent } from "../contexts/document-ingestion/infrastructure/adapters/aws-dynamo-idempotency-service";
+import { withMetrics } from "../shared/infrastructure/metrics/metrics";
+
+const notificationHandler = async (event: SQSEvent) => {
+  const errorMessage = "Lambda missing NOTIFICATION_TOPIC_ARN or DOCUMENTS_METADATA_TABLE";
+  const notificationTopicArn = requireEnv(process.env.NOTIFICATION_TOPIC_ARN, errorMessage);
+  const metadataTable = requireEnv(process.env.DOCUMENTS_METADATA_TABLE, errorMessage);
+
+  const useCase = new SendNotificationUseCase(
+    new AwsSnsNotificationSender(notificationTopicArn)
+  );
+
+  for (const record of event.Records) {
+    await runIdempotent(metadataTable, `notification#${record.messageId}`, async () => {
+      const body = JSON.parse(record.body);
+      await useCase.execute({
+        documentId: body.documentId,
+        message: "Document processed successfully"
+      });
+      return { sent: true };
+    });
+  }
+
+  return { ok: true };
+};
+
+function firstRecordDocumentId(event: SQSEvent): string | undefined {
+  try {
+    return JSON.parse(event.Records[0]?.body ?? "{}").documentId;
+  } catch {
+    return undefined;
+  }
+}
+
+export const handler = withMetrics("notification", notificationHandler, {
+  getCorrelationId: firstRecordDocumentId
+});
+

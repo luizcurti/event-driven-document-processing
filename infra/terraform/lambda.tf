@@ -1,0 +1,99 @@
+resource "aws_lambda_function" "this" {
+  for_each = local.lambda_config
+
+  function_name                  = "${local.name_prefix}-${each.key}"
+  role                           = aws_iam_role.lambda_execution[each.key].arn
+  package_type                   = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? "Image" : "Zip"
+  runtime                        = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "local" ? "nodejs20.x" : "nodejs22.x")
+  handler                        = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : each.value.handler
+  image_uri                      = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? var.thumbnail_lambda_image_uri : null
+  timeout                        = each.value.timeout
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_enabled ? each.value.reserved_concurrency : -1
+  # Each apply that changes the code/config publishes an immutable numbered version
+  # (below), which the "live" alias points at (see aws_lambda_alias.live) — the
+  # prerequisite for a deploy pipeline to shift an alias between versions for
+  # gradual rollout/rollback instead of overwriting $LATEST in place.
+  publish = true
+
+  tracing_config {
+    mode = "Active"
+  }
+
+  dynamic "dead_letter_config" {
+    for_each = contains(local.async_invoked_lambdas, each.key) ? [1] : []
+    content {
+      target_arn = aws_sqs_queue.lambda_invocations_dlq.arn
+    }
+  }
+
+  filename  = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "local" ? var.local_lambda_zip_path : null)
+  s3_bucket = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "cloud" ? var.lambda_artifacts_bucket : null)
+  s3_key = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "cloud" ? lookup(
+    var.lambda_artifact_keys,
+    each.key,
+    "${var.lambda_artifacts_prefix}/${each.key}.zip"
+  ) : null)
+
+  source_code_hash = each.key == "thumbnail" && var.thumbnail_lambda_image_uri != "" ? null : (var.deployment_mode == "local" ? filebase64sha256(var.local_lambda_zip_path) : lookup(var.lambda_artifact_hashes, each.key, null))
+  kms_key_arn      = aws_kms_key.platform.arn
+
+  environment {
+    variables = merge(
+      {
+        DOCUMENTS_BUCKET           = aws_s3_bucket.documents.bucket
+        DOCUMENTS_METADATA_TABLE   = aws_dynamodb_table.documents_metadata.name
+        NOTIFICATION_QUEUE_URL     = aws_sqs_queue.notifications.url
+        NOTIFICATION_TOPIC_ARN     = aws_sns_topic.notifications.arn
+        ENVIRONMENT                = var.environment
+        AWS_EXECUTION_MODE         = var.deployment_mode
+        AWS_ENDPOINT_URL           = var.deployment_mode == "local" ? "http://localhost.localstack.cloud:4566" : ""
+        PROMETHEUS_PUSHGATEWAY_URL = var.deployment_mode == "local" ? "http://pushgateway:9091" : ""
+      },
+      each.key == "ocr" ? {
+        TEXTRACT_ROLE_ARN  = aws_iam_role.textract_service.arn
+        TEXTRACT_TOPIC_ARN = aws_sns_topic.textract_completion.arn
+      } : {}
+    )
+  }
+
+  tags = merge(local.tags, {
+    Name = "${local.name_prefix}-${each.key}"
+  })
+
+  # CreateFunction / CreateEventSourceMapping check the execution role's permissions up front
+  # (sqs:SendMessage for the dead_letter_config, sqs:ReceiveMessage for the SQS trigger).
+  # Depending only on the role lets Terraform create the function before the role's policies
+  # exist, and AWS rejects it.
+  depends_on = [
+    aws_iam_role_policy.lambda_custom_access,
+    aws_iam_role_policy_attachment.lambda_basic_execution,
+  ]
+}
+
+resource "aws_cloudwatch_log_group" "lambda" {
+  for_each = local.lambda_config
+
+  name              = "/aws/lambda/${local.name_prefix}-${each.key}"
+  retention_in_days = var.logs_retention_in_days
+  kms_key_id        = aws_kms_key.platform.arn
+
+  tags = merge(local.tags, {
+    Name = "/aws/lambda/${local.name_prefix}-${each.key}"
+  })
+}
+
+resource "aws_lambda_alias" "live" {
+  for_each = local.lambda_config
+
+  name             = "live"
+  description      = "Points at the version a deploy pipeline promotes; every trigger in this stack still invokes the function's unqualified ARN ($LATEST) directly."
+  function_name    = aws_lambda_function.this[each.key].function_name
+  function_version = aws_lambda_function.this[each.key].version
+}
+
+resource "aws_lambda_event_source_mapping" "notification_consumer" {
+  event_source_arn = aws_sqs_queue.notifications.arn
+  function_name    = aws_lambda_function.this["notification"].arn
+  batch_size       = 10
+  enabled          = true
+}

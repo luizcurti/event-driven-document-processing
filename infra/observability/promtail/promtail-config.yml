@@ -1,0 +1,47 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # Discovers every container on the host's Docker daemon whose name contains
+  # "document-processing" — this project's long-running services (LocalStack,
+  # Prometheus, Pushgateway, Grafana) plus the short-lived, per-function
+  # execution containers LocalStack spins up for each Lambda invocation
+  # (named "document-processing-localstack-lambda-<function>-<hash>"), which
+  # is where the actual Lambda console.log/console.error output lands.
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: name
+            values: ["document-processing"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.*)"
+        target_label: container
+      - target_label: job
+        replacement: document-processing
+      - source_labels: [container]
+        regex: "document-processing-localstack-lambda-document-processing-platform-local-(.+)-[0-9a-f]{32}"
+        target_label: function_name
+    pipeline_stages:
+      # Lambda runtime log lines look like:
+      #   <timestamp>\t<requestId>\t<LEVEL>\t<message>
+      # `<message>` is the raw argument passed to console.log/console.error —
+      # here always the JSON produced by ConsoleLogger (see
+      # src/shared/infrastructure/logging/logger.ts).
+      - regex:
+          expression: '^\S+\t(?P<request_id>\S+)\t\S+\t(?P<content>.*)$'
+      - json:
+          source: content
+          expressions:
+            level: level
+      - labels:
+          level:
